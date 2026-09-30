@@ -10,9 +10,8 @@ use uuid::Uuid;
 use crate::effect::{Action, EffectReceipt, ExecutionOutcome, Observation};
 use crate::state::{self, ContentHash, Entry, EntryKind, FsState, ObserveError};
 use crate::trace::{TaskEvent, TraceLogger};
+use crate::trusted::{self, StateRoot, TrustError};
 
-const V9R_DIR: &str = ".v9r";
-const BACKUPS_DIR: &str = "backups";
 const SNAPSHOT_MANIFEST: &str = "manifest.json";
 const SNAPSHOT_MANIFEST_VERSION: u32 = 2;
 const SAFETY_ERROR: &str = "Safety Error: Cannot use a project root (or a subfolder of one) as a mutable workdir. Place the workdir somewhere outside any version-controlled tree, or opt in by creating a `.v9r-workdir` file inside it.";
@@ -61,6 +60,8 @@ pub enum TransactionError {
     Join(String),
     #[error("trace: {0}")]
     Trace(#[from] crate::trace::TraceError),
+    #[error("trusted state: {0}")]
+    Trust(#[from] TrustError),
 }
 
 impl From<ObserveError> for TransactionError {
@@ -77,6 +78,21 @@ pub type Result<T> = std::result::Result<T, TransactionError>;
 struct TaskFsState {
     workdir: PathBuf,
     blocked: bool,
+    /// Where this task's trusted state lives. Resolved from the
+    /// environment at the first checkpoint if not registered explicitly.
+    state_root: Option<StateRoot>,
+    /// In-memory seals of the checkpoints this process created. The
+    /// on-disk manifest is only trusted if it still matches its seal.
+    seals: HashMap<CheckpointId, CheckpointSeal>,
+}
+
+/// What the runtime remembers about a checkpoint independently of disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointSeal {
+    /// SHA-256 of the manifest file as written.
+    pub manifest: ContentHash,
+    /// Digest of the checkpointed workspace state.
+    pub state: ContentHash,
 }
 
 /// On-disk checkpoint manifest. Version 1 (`files`/`dirs` with FNV-64)
@@ -100,7 +116,75 @@ pub fn register_task(task_id: Uuid, workdir: PathBuf) {
         .or_insert(TaskFsState {
             workdir,
             blocked: false,
+            state_root: None,
+            seals: HashMap::new(),
         });
+}
+
+/// Register a task with an explicit trusted state root. Fails if the
+/// workspace and the state root overlap.
+pub fn register_task_with_state(
+    task_id: Uuid,
+    workdir: PathBuf,
+    state_root: StateRoot,
+) -> Result<()> {
+    state_root.check_separation(&workdir)?;
+    register_task(task_id, workdir);
+    let mut tasks = tasks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(state) = tasks.get_mut(&task_id) {
+        state.state_root = Some(state_root);
+    }
+    Ok(())
+}
+
+/// The trusted state root registered for a task, if any.
+pub fn task_state_root(task_id: Uuid) -> Option<StateRoot> {
+    let tasks = tasks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tasks
+        .get(&task_id)
+        .and_then(|state| state.state_root.clone())
+}
+
+/// The in-memory seal of a checkpoint created by this process.
+pub fn checkpoint_seal(task_id: Uuid, checkpoint: CheckpointId) -> Option<CheckpointSeal> {
+    let tasks = tasks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tasks
+        .get(&task_id)
+        .and_then(|state| state.seals.get(&checkpoint).copied())
+}
+
+/// Re-hash every sealed checkpoint manifest of a task. Returns the
+/// checkpoints whose manifest is missing or no longer matches its seal.
+/// Backup payloads are checked against the manifest at rollback time.
+pub fn tampered_checkpoints(task_id: Uuid) -> Result<Vec<CheckpointId>> {
+    let (root, seals) = {
+        let tasks = tasks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = tasks
+            .get(&task_id)
+            .ok_or(TransactionError::UnknownTask(task_id))?;
+        (state.state_root.clone(), state.seals.clone())
+    };
+    let Some(root) = root else {
+        return Ok(Vec::new());
+    };
+    let mut tampered: Vec<CheckpointId> = seals
+        .iter()
+        .filter(|(id, seal)| {
+            let path = checkpoint_dir(&root, task_id, **id).join(SNAPSHOT_MANIFEST);
+            fs::read(path).map(|bytes| ContentHash::of(&bytes)).ok() != Some(seal.manifest)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    tampered.sort_by_key(|id| id.0);
+    Ok(tampered)
 }
 
 fn has_marker_at(dir: &Path) -> bool {
@@ -193,13 +277,23 @@ pub fn ensure_task_fs_unblocked(task_id: Uuid) -> Result<()> {
 }
 
 pub async fn checkpoint(task_id: Uuid, trace: &TraceLogger) -> Result<CheckpointId> {
-    let checkpoint = tokio::task::spawn_blocking(move || checkpoint_untraced(task_id))
-        .await
-        .map_err(|err| TransactionError::Join(err.to_string()))??;
+    Ok(checkpoint_with_state(task_id, trace).await?.0)
+}
+
+/// Checkpoint and also return the observed workspace state, so callers
+/// that need an observation right after checkpointing need not rescan.
+pub(crate) async fn checkpoint_with_state(
+    task_id: Uuid,
+    trace: &TraceLogger,
+) -> Result<(CheckpointId, PathBuf, FsState)> {
+    let (checkpoint, workdir, state) =
+        tokio::task::spawn_blocking(move || checkpoint_untraced(task_id))
+            .await
+            .map_err(|err| TransactionError::Join(err.to_string()))??;
     trace
         .log_event(TaskEvent::CheckpointCreated { id: checkpoint })
         .await?;
-    Ok(checkpoint)
+    Ok((checkpoint, workdir, state))
 }
 
 pub async fn rollback(task_id: Uuid, checkpoint: CheckpointId, trace: &TraceLogger) -> Result<()> {
@@ -263,11 +357,16 @@ pub async fn rollback_observed(
     Ok(ObservedRollback { result, receipt })
 }
 
-fn checkpoint_untraced(task_id: Uuid) -> Result<CheckpointId> {
+fn checkpoint_untraced(task_id: Uuid) -> Result<(CheckpointId, PathBuf, FsState)> {
     let workdir = registered_workdir(task_id, true)?;
     ensure_safe_directory(&workdir)?;
+    trusted::check_legacy_layout(&workdir)?;
+    let root = resolve_state_root(task_id)?;
+    root.check_separation(&workdir)?;
+    root.ensure_task_dir(task_id)?;
+
     let checkpoint = CheckpointId(Uuid::new_v4());
-    let backup_dir = backup_dir(&workdir, task_id, checkpoint);
+    let backup_dir = checkpoint_dir(&root, task_id, checkpoint);
     let tmp_path = backup_dir.with_file_name(format!(".tmp-{}", checkpoint.0));
 
     remove_dir_if_exists(&tmp_path)?;
@@ -279,13 +378,20 @@ fn checkpoint_untraced(task_id: Uuid) -> Result<CheckpointId> {
             return Err(err);
         }
     };
-    write_snapshot_manifest(&tmp_path, &manifest)?;
-    if let Some(parent) = backup_dir.parent() {
-        create_dir_all(parent)?;
-    }
+    let manifest_hash = write_snapshot_manifest(&tmp_path, &manifest)?;
     rename(&tmp_path, &backup_dir)?;
 
-    Ok(checkpoint)
+    let seal = CheckpointSeal {
+        manifest: manifest_hash,
+        state: manifest.state.digest(),
+    };
+    let mut tasks = tasks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(state) = tasks.get_mut(&task_id) {
+        state.seals.insert(checkpoint, seal);
+    }
+    Ok((checkpoint, workdir, manifest.state))
 }
 
 fn rollback_untraced(task_id: Uuid, checkpoint: CheckpointId) -> Result<()> {
@@ -299,16 +405,38 @@ fn rollback_untraced(task_id: Uuid, checkpoint: CheckpointId) -> Result<()> {
     // and `selective_rollback` becomes a no-op diff.
     ensure_safe_directory(&workdir)?;
 
-    let backup_dir = backup_dir(&workdir, task_id, checkpoint);
-    if !backup_dir.is_dir() {
-        return Err(TransactionError::Io {
-            path: backup_dir,
-            source: io::Error::new(io::ErrorKind::NotFound, "checkpoint not found"),
-        });
-    }
-    let manifest = read_snapshot_manifest(&backup_dir)?;
+    // Only checkpoints sealed by this process are restorable: the seal is
+    // what makes the on-disk manifest trustworthy.
+    let seal = checkpoint_seal(task_id, checkpoint).ok_or_else(|| {
+        TransactionError::Safety(format!(
+            "checkpoint {} was not created by this runtime; refusing to restore from it",
+            checkpoint.0
+        ))
+    })?;
+    let root = task_state_root(task_id)
+        .ok_or_else(|| TransactionError::Safety("task has no trusted state root".to_string()))?;
+    let backup_dir = checkpoint_dir(&root, task_id, checkpoint);
+    let manifest = read_snapshot_manifest(&backup_dir, seal.manifest)?;
     selective_rollback(&workdir, &backup_dir, &manifest)?;
     Ok(())
+}
+
+fn resolve_state_root(task_id: Uuid) -> Result<StateRoot> {
+    if let Some(root) = task_state_root(task_id) {
+        return Ok(root);
+    }
+    let root = StateRoot::from_env()?;
+    let mut tasks = tasks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = tasks
+        .get_mut(&task_id)
+        .ok_or(TransactionError::UnknownTask(task_id))?;
+    Ok(state.state_root.get_or_insert(root).clone())
+}
+
+fn checkpoint_dir(root: &StateRoot, task_id: Uuid, checkpoint: CheckpointId) -> PathBuf {
+    root.checkpoints_dir(task_id).join(checkpoint.0.to_string())
 }
 
 fn tasks() -> &'static Mutex<HashMap<Uuid, TaskFsState>> {
@@ -326,14 +454,6 @@ fn registered_workdir(task_id: Uuid, require_unblocked: bool) -> Result<PathBuf>
         return Err(TransactionError::FilesystemBlocked(task_id));
     }
     Ok(state.workdir.clone())
-}
-
-fn backup_dir(workdir: &Path, task_id: Uuid, checkpoint: CheckpointId) -> PathBuf {
-    workdir
-        .join(V9R_DIR)
-        .join(BACKUPS_DIR)
-        .join(task_id.to_string())
-        .join(checkpoint.0.to_string())
 }
 
 fn backup_workdir(workdir: &Path, backup_dir: &Path) -> Result<SnapshotManifest> {
@@ -511,20 +631,28 @@ fn restore_file(
         .map_err(|source| TransactionError::Io { path: dst, source })
 }
 
-fn write_snapshot_manifest(backup_dir: &Path, manifest: &SnapshotManifest) -> Result<()> {
+fn write_snapshot_manifest(backup_dir: &Path, manifest: &SnapshotManifest) -> Result<ContentHash> {
     let path = backup_dir.join(SNAPSHOT_MANIFEST);
     let bytes = serde_json::to_vec(manifest).map_err(|source| {
         TransactionError::Safety(format!("snapshot manifest encode failed: {source}"))
     })?;
-    fs::write(&path, bytes).map_err(|source| TransactionError::Io { path, source })
+    let hash = ContentHash::of(&bytes);
+    fs::write(&path, bytes).map_err(|source| TransactionError::Io { path, source })?;
+    Ok(hash)
 }
 
-fn read_snapshot_manifest(backup_dir: &Path) -> Result<SnapshotManifest> {
+fn read_snapshot_manifest(backup_dir: &Path, sealed: ContentHash) -> Result<SnapshotManifest> {
     let path = backup_dir.join(SNAPSHOT_MANIFEST);
     let bytes = fs::read(&path).map_err(|source| TransactionError::Io {
         path: path.clone(),
         source,
     })?;
+    if ContentHash::of(&bytes) != sealed {
+        return Err(TransactionError::Safety(format!(
+            "checkpoint manifest does not match its seal: {}",
+            path.display()
+        )));
+    }
     serde_json::from_slice(&bytes).map_err(|source| {
         TransactionError::Safety(format!("snapshot manifest decode failed: {source}"))
     })
@@ -576,6 +704,17 @@ mod tests {
         dir
     }
 
+    /// A workspace and a separate trusted state root, registered together.
+    fn registered(name: &str) -> (PathBuf, Uuid) {
+        let base = temp_dir(name);
+        let dir = base.join("work");
+        fs::create_dir_all(&dir).unwrap();
+        let task_id = Uuid::new_v4();
+        let root = StateRoot::open(&base.join("state")).unwrap();
+        register_task_with_state(task_id, dir.clone(), root).unwrap();
+        (dir, task_id)
+    }
+
     #[test]
     fn rejects_project_roots_as_workdirs() {
         let dir = temp_dir("safety");
@@ -588,13 +727,11 @@ mod tests {
 
     #[test]
     fn rollback_restores_modified_files_and_deletes_new_files_only() {
-        let dir = temp_dir("rollback");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("rollback");
         fs::write(dir.join("keep.txt"), "original\n").unwrap();
         fs::create_dir_all(dir.join("stable-dir")).unwrap();
 
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::write(dir.join("keep.txt"), "changed\n").unwrap();
         fs::write(dir.join("new.txt"), "new\n").unwrap();
         fs::create_dir_all(dir.join("new-dir")).unwrap();
@@ -648,12 +785,10 @@ mod tests {
 
     #[test]
     fn rollback_is_idempotent() {
-        let dir = temp_dir("idempotent");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("idempotent");
         fs::write(dir.join("a.txt"), "v1\n").unwrap();
 
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::write(dir.join("a.txt"), "v2\n").unwrap();
         fs::write(dir.join("b.txt"), "added\n").unwrap();
 
@@ -671,11 +806,9 @@ mod tests {
         // If a `git init` (or similar) happens inside the workdir between
         // checkpoint and rollback, refuse to rollback. Otherwise we'd
         // happily delete the brand-new `.git/` as "files not in snapshot."
-        let dir = temp_dir("post-checkpoint-git");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("post-checkpoint-git");
         fs::write(dir.join("file.txt"), "x").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
 
         // Simulate `git init` happening after checkpoint.
         fs::create_dir_all(dir.join(".git")).unwrap();
@@ -688,14 +821,12 @@ mod tests {
 
     #[test]
     fn rollback_rejects_tampered_manifest_with_dotdot() {
-        let dir = temp_dir("tampered");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("tampered");
         fs::write(dir.join("x.txt"), "x").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
 
         // Forge a manifest with a `..` path.
-        let backup = backup_dir(&dir, task_id, checkpoint);
+        let backup = checkpoint_dir(&task_state_root(task_id).unwrap(), task_id, checkpoint);
         let mut state = FsState::default();
         state.entries.insert(
             "../escape.txt".to_string(),
@@ -718,35 +849,116 @@ mod tests {
 
     #[test]
     fn rollback_preserves_trace_history_written_after_checkpoint() {
-        // Regression: `trace.jsonl` used to be part of the snapshot, so a
-        // rollback restored it to its checkpoint-time content and erased
-        // every event logged during the task.
-        let dir = temp_dir("trace-history");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
-        fs::write(dir.join("trace.jsonl"), "before\n").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
-        fs::write(dir.join("trace.jsonl"), "before\nevidence\n").unwrap();
+        // Regression: the trace used to live in the workspace and was
+        // restored to its checkpoint-time content, erasing every event
+        // logged during the task. It now lives under the state root.
+        let (dir, task_id) = registered("trace-history");
+        let trace = task_state_root(task_id).unwrap().trace_path(task_id);
+        fs::create_dir_all(trace.parent().unwrap()).unwrap();
+        fs::write(&trace, "before\n").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
+        fs::write(&trace, "before\nevidence\n").unwrap();
         fs::write(dir.join("new.txt"), "x").unwrap();
 
         rollback_untraced(task_id, checkpoint).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(dir.join("trace.jsonl")).unwrap(),
-            "before\nevidence\n"
-        );
+        assert_eq!(fs::read_to_string(&trace).unwrap(), "before\nevidence\n");
         assert!(!dir.join("new.txt").exists());
+    }
+
+    #[test]
+    fn trusted_state_is_outside_the_workspace() {
+        let (dir, task_id) = registered("outside");
+        fs::write(dir.join("a.txt"), "a").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
+        let root = task_state_root(task_id).unwrap();
+        let backup = checkpoint_dir(&root, task_id, checkpoint);
+        assert!(backup.join(SNAPSHOT_MANIFEST).is_file());
+        assert!(!backup.starts_with(&dir));
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["a.txt"]);
+    }
+
+    #[test]
+    fn workspace_dot_v9r_created_by_task_is_ordinary_content() {
+        // With runtime state moved out, `.v9r` in the workspace is task
+        // content: it is snapshotted, observed and rolled back like any file.
+        let (dir, task_id) = registered("dot-v9r");
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
+        fs::create_dir_all(dir.join(".v9r/backups")).unwrap();
+        fs::write(dir.join(".v9r/backups/manifest.json"), "forged").unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert!(!dir.join(".v9r").exists());
+    }
+
+    #[test]
+    fn legacy_workspace_layout_fails_explicitly() {
+        let (dir, task_id) = registered("legacy");
+        fs::create_dir_all(dir.join(".v9r/backups")).unwrap();
+        let err = checkpoint_untraced(task_id).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TransactionError::Trust(TrustError::LegacyLayout { .. })
+            ),
+            "{err}"
+        );
+
+        let (dir, task_id) = registered("legacy-trace");
+        fs::write(dir.join("trace.jsonl"), "{}").unwrap();
+        assert!(checkpoint_untraced(task_id).is_err());
+    }
+
+    #[test]
+    fn rollback_refuses_checkpoint_not_sealed_by_this_runtime() {
+        let (_dir, task_id) = registered("unsealed");
+        checkpoint_untraced(task_id).unwrap();
+        let foreign = CheckpointId(Uuid::new_v4());
+        let err = rollback_untraced(task_id, foreign).unwrap_err();
+        assert!(matches!(err, TransactionError::Safety(_)), "{err}");
+    }
+
+    #[test]
+    fn rollback_refuses_manifest_that_no_longer_matches_seal() {
+        let (dir, task_id) = registered("reseal");
+        fs::write(dir.join("a.txt"), "orig").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
+        fs::write(dir.join("a.txt"), "changed").unwrap();
+        let root = task_state_root(task_id).unwrap();
+        let backup = checkpoint_dir(&root, task_id, checkpoint);
+        // A consistent forgery: backup and manifest both rewritten.
+        fs::write(backup.join("a.txt"), "forged").unwrap();
+        let mut manifest: SnapshotManifest =
+            serde_json::from_slice(&fs::read(backup.join(SNAPSHOT_MANIFEST)).unwrap()).unwrap();
+        manifest.state.entries.insert(
+            "a.txt".to_string(),
+            Entry {
+                kind: EntryKind::File,
+                len: Some(6),
+                sha256: Some(ContentHash::of(b"forged")),
+                link_target: None,
+            },
+        );
+        write_snapshot_manifest(&backup, &manifest).unwrap();
+        assert_eq!(tampered_checkpoints(task_id).unwrap(), [checkpoint]);
+
+        let err = rollback_untraced(task_id, checkpoint).unwrap_err();
+        assert!(matches!(err, TransactionError::Safety(_)), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
     }
 
     #[test]
     fn rollback_restores_file_replaced_by_directory() {
         // Regression: `path.exists()` was true for the directory, so the
         // original file was never restored.
-        let dir = temp_dir("file-to-dir");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("file-to-dir");
         fs::write(dir.join("a"), "orig").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::remove_file(dir.join("a")).unwrap();
         fs::create_dir_all(dir.join("a/nested")).unwrap();
         fs::write(dir.join("a/nested/inner"), "x").unwrap();
@@ -758,12 +970,10 @@ mod tests {
 
     #[test]
     fn rollback_restores_directory_replaced_by_file() {
-        let dir = temp_dir("dir-to-file");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("dir-to-file");
         fs::create_dir_all(dir.join("d")).unwrap();
         fs::write(dir.join("d/x"), "x").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::remove_dir_all(dir.join("d")).unwrap();
         fs::write(dir.join("d"), "now a file").unwrap();
 
@@ -776,11 +986,9 @@ mod tests {
     fn rollback_recreates_deleted_empty_directory() {
         // Regression: snapshot dirs were only used to decide what not to
         // delete, never restored.
-        let dir = temp_dir("empty-dir");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("empty-dir");
         fs::create_dir_all(dir.join("empty/inner")).unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::remove_dir_all(dir.join("empty")).unwrap();
 
         rollback_untraced(task_id, checkpoint).unwrap();
@@ -799,7 +1007,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         register_task(task_id, dir.clone());
         fs::write(dir.join("a.txt"), "orig").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::remove_file(dir.join("a.txt")).unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("a.txt")).unwrap();
 
@@ -822,7 +1030,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         register_task(task_id, dir.clone());
         fs::write(dir.join("orig.txt"), "orig").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::remove_file(dir.join("orig.txt")).unwrap();
         std::os::unix::fs::symlink(outside.join("target.txt"), dir.join("orig.txt")).unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("dirlink")).unwrap();
@@ -842,13 +1050,11 @@ mod tests {
 
     #[test]
     fn rollback_refuses_backup_that_does_not_match_manifest() {
-        let dir = temp_dir("tampered-backup");
-        let task_id = Uuid::new_v4();
-        register_task(task_id, dir.clone());
+        let (dir, task_id) = registered("tampered-backup");
         fs::write(dir.join("a.txt"), "orig").unwrap();
-        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap().0;
         fs::write(dir.join("a.txt"), "changed").unwrap();
-        let backup = backup_dir(&dir, task_id, checkpoint);
+        let backup = checkpoint_dir(&task_state_root(task_id).unwrap(), task_id, checkpoint);
         fs::write(backup.join("a.txt"), "forged").unwrap();
 
         fs::write(dir.join("new.txt"), "new").unwrap();

@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod state;
 pub mod task;
 pub mod trace;
+pub mod trusted;
 pub mod vfs;
 
 use std::fmt;

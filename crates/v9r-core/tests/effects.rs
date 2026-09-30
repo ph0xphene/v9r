@@ -4,7 +4,7 @@
 //! existing `run_task_step` path, bracketed by observations.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use uuid::Uuid;
 use v9r_core::effect::{
@@ -16,15 +16,19 @@ use v9r_core::manifest::Manifest;
 use v9r_core::state::{ContentHash, EntryKind};
 use v9r_core::task::Task;
 use v9r_core::trace::{TaskEvent, TraceLogger};
+use v9r_core::trusted::StateRoot;
 use v9r_core::vfs;
 
-struct Workdir(PathBuf);
+/// `.0` is the agent workspace, `.1` the trusted state root next to it.
+struct Workdir(PathBuf, StateRoot, PathBuf);
 
 impl Workdir {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("v9r-effects-{name}-{}", Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("v9r-effects-{name}-{}", Uuid::new_v4()));
+        let dir = base.join("work");
         fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        let root = StateRoot::open(&base.join("state")).unwrap();
+        Self(dir, root, base)
     }
 
     fn write(&self, rel: &str, content: &str) {
@@ -36,11 +40,12 @@ impl Workdir {
 
 impl Drop for Workdir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.2);
     }
 }
 
-fn task_in(dir: &Path) -> Task {
+fn task_in(workdir: &Workdir) -> Task {
+    let dir = workdir.0.as_path();
     let manifest = Manifest {
         allow_read: vec![dir.to_path_buf()],
         allow_write: vec![dir.to_path_buf()],
@@ -57,8 +62,13 @@ fn task_in(dir: &Path) -> Task {
         test_commands: Vec::new(),
     };
     let task = Task::new(manifest, dir.to_path_buf());
-    vfs::register_task(task.id, dir.to_path_buf());
+    vfs::register_task_with_state(task.id, dir.to_path_buf(), workdir.1.clone()).unwrap();
     task
+}
+
+async fn trace_for(dir: &Workdir, task: &Task) -> TraceLogger {
+    dir.1.ensure_task_dir(task.id).unwrap();
+    TraceLogger::for_task(&dir.1, task.id).await.unwrap()
 }
 
 fn spec(argv: &[&str]) -> CommandSpec {
@@ -72,8 +82,8 @@ fn spec(argv: &[&str]) -> CommandSpec {
 }
 
 async fn observed(dir: &Workdir, argv: &[&str]) -> (ObservedStep, TraceLogger) {
-    let mut task = task_in(&dir.0);
-    let trace = TraceLogger::new(dir.0.join("trace.jsonl")).await.unwrap();
+    let mut task = task_in(dir);
+    let trace = trace_for(dir, &task).await;
     let step = run_observed_step(&mut task, spec(argv), None, &trace)
         .await
         .unwrap();
@@ -100,8 +110,8 @@ fn exit_code(receipt: &EffectReceipt) -> i32 {
     }
 }
 
-fn trace_receipts(dir: &Workdir) -> Vec<ReceiptRecord> {
-    fs::read_to_string(dir.0.join("trace.jsonl"))
+fn trace_receipts(trace: &TraceLogger) -> Vec<ReceiptRecord> {
+    fs::read_to_string(trace.path())
         .unwrap()
         .lines()
         .filter_map(
@@ -158,12 +168,12 @@ async fn c_failed_command_without_effect() {
 async fn d_failed_command_still_has_verified_effect() {
     let dir = Workdir::new("d");
     // touch creates the first operand, then fails on the second.
-    let (step, _) = observed(&dir, &["touch", "made.txt", "no-such-dir/x"]).await;
+    let (step, trace) = observed(&dir, &["touch", "made.txt", "no-such-dir/x"]).await;
     assert_ne!(exit_code(&step.receipt), 0);
     assert!(!step.receipt.outcome().is_success());
     assert_eq!(summary(&step.receipt), ["+made.txt"]);
     // The persisted record keeps both facts side by side.
-    let record = &trace_receipts(&dir)[0];
+    let record = &trace_receipts(&trace)[0];
     assert_eq!(record.outcome, ExecutionOutcome::Exited { code: 1 });
     assert_eq!(record.verified.len(), 1);
 }
@@ -205,13 +215,13 @@ async fn g_multiple_effects_in_one_receipt() {
     dir.write("a.txt", "a");
     dir.write("c.txt", "c-new");
     dir.write("dest/c.txt", "c-old");
-    let (step, _) = observed(&dir, &["mv", "a.txt", "c.txt", "dest"]).await;
+    let (step, trace) = observed(&dir, &["mv", "a.txt", "c.txt", "dest"]).await;
     assert_eq!(exit_code(&step.receipt), 0);
     assert_eq!(
         summary(&step.receipt),
         ["-a.txt", "-c.txt", "+dest/a.txt", "~dest/c.txt"]
     );
-    assert_eq!(trace_receipts(&dir).len(), 1);
+    assert_eq!(trace_receipts(&trace).len(), 1);
 }
 
 // H. rollback does not erase what was observed during execution
@@ -219,8 +229,8 @@ async fn g_multiple_effects_in_one_receipt() {
 async fn h_rollback_keeps_historical_effects_separate_from_final_state() {
     let dir = Workdir::new("h");
     dir.write("keep.txt", "original");
-    let mut task = task_in(&dir.0);
-    let trace = TraceLogger::new(dir.0.join("trace.jsonl")).await.unwrap();
+    let mut task = task_in(&dir);
+    let trace = trace_for(&dir, &task).await;
     let checkpoint = vfs::checkpoint(task.id, &trace).await.unwrap();
     let before_task = Observation::capture(&dir.0).unwrap();
 
@@ -252,39 +262,45 @@ async fn h_rollback_keeps_historical_effects_separate_from_final_state() {
     assert_eq!(rolled.receipt.post_state(), Some(step.receipt.pre_state()));
 
     // The trace survives rollback and holds both receipts.
-    let records = trace_receipts(&dir);
+    let records = trace_receipts(&trace);
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].verified[0].path(), "new.txt");
     assert_eq!(records[0].requested.as_deref(), Some("create new.txt"));
     assert!(matches!(records[1].action, effect::Action::Rollback { .. }));
 }
 
-// I. runtime-internal state is not a task effect
+// I. runtime state lives outside the workspace and never shows up as an effect
 #[tokio::test]
-async fn i_internal_state_is_excluded() {
+async fn i_runtime_state_is_not_in_the_workspace() {
     let dir = Workdir::new("i");
-    let task = task_in(&dir.0);
-    let trace = TraceLogger::new(dir.0.join("trace.jsonl")).await.unwrap();
-    // Checkpoint writes .v9r/, the step appends to trace.jsonl.
+    let mut task = task_in(&dir);
+    let trace = trace_for(&dir, &task).await;
     vfs::checkpoint(task.id, &trace).await.unwrap();
-    let (step, _) = observed(&dir, &["true"]).await;
+    let step = run_observed_step(&mut task, spec(&["true"]), None, &trace)
+        .await
+        .unwrap();
     assert!(step.receipt.verified().is_empty());
-    assert_eq!(step.receipt.scope().excluded, [".v9r", "trace.jsonl"]);
+    assert!(step.receipt.scope().excluded.is_empty());
     assert!(!step.receipt.scope().follows_symlinks);
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
+    assert!(trace.path().starts_with(dir.1.path()));
 }
 
-// I'. …which is also a blind spot: writes into excluded paths are unobserved.
+// I'. …so the former blind spot is gone: writing `.v9r` in the workspace
+// is an ordinary, observed effect that cannot reach runtime state.
 #[tokio::test]
-async fn i_writes_into_excluded_paths_are_outside_scope() {
+async fn i_writes_to_workspace_dot_v9r_are_observed() {
     let dir = Workdir::new("i-blind");
     fs::create_dir_all(dir.0.join(".v9r")).unwrap();
     let (step, _) = observed(&dir, &["touch", ".v9r/planted"]).await;
     assert_eq!(exit_code(&step.receipt), 0);
-    assert!(dir.0.join(".v9r/planted").exists());
-    assert!(
-        step.receipt.verified().is_empty(),
-        "excluded paths are out of scope, not verified unchanged"
+    assert_eq!(
+        summary(&step.receipt),
+        [".v9r/planted"].map(|p| format!("+{p}"))
     );
+    assert!(fs::read_dir(dir.1.path().join("tasks"))
+        .unwrap()
+        .all(|task| !task.unwrap().path().join("planted").exists()));
 }
 
 // J. determinism
@@ -420,8 +436,8 @@ async fn denied_command_is_not_started_and_has_no_effect() {
 #[tokio::test]
 async fn effects_outside_declared_writes_are_flagged() {
     let dir = Workdir::new("declared");
-    let mut task = task_in(&dir.0);
-    let trace = TraceLogger::new(dir.0.join("trace.jsonl")).await.unwrap();
+    let mut task = task_in(&dir);
+    let trace = trace_for(&dir, &task).await;
     let mut command = spec(&["touch", "out/a.txt", "stray.txt"]);
     command.writes = vec![PathBuf::from("out")];
     fs::create_dir_all(dir.0.join("out")).unwrap();
@@ -458,8 +474,8 @@ impl SemanticOracle for MockOracle {
 #[tokio::test]
 async fn semantic_assessment_is_unknown_without_oracle_and_never_verified() {
     let dir = Workdir::new("semantic");
-    let mut task = task_in(&dir.0);
-    let trace = TraceLogger::new(dir.0.join("trace.jsonl")).await.unwrap();
+    let mut task = task_in(&dir);
+    let trace = trace_for(&dir, &task).await;
     let mut step = run_observed_step(
         &mut task,
         spec(&["touch", "report.txt"]),

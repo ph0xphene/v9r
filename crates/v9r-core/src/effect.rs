@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::normalize_path;
-use crate::state::{self, ContentHash, Entry, FsState, ObserveError, INTERNAL_PATHS};
+use crate::state::{self, ContentHash, Entry, FsState, ObserveError};
 use crate::vfs::CheckpointId;
 
 /// A claim established by deterministic before/after observation.
@@ -321,7 +321,7 @@ impl EffectReceipt {
     ) -> Self {
         let scope = ObservationScope {
             root: pre.root.clone(),
-            excluded: INTERNAL_PATHS.iter().map(|s| s.to_string()).collect(),
+            excluded: Vec::new(),
             follows_symlinks: false,
         };
         let (post_state, verified, unknown) = match post {

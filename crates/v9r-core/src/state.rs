@@ -13,6 +13,9 @@
 //! during the walk, so a path swapped for a symlink or FIFO mid-scan is
 //! reported as unobserved instead of being read through.
 //!
+//! Nothing under the root is excluded: runtime state lives outside the
+//! workspace (see `crate::trusted`).
+//!
 //! Anything the walk cannot observe reliably (unreadable entries, entries
 //! that vanish or change during the scan, non-UTF-8 names) is recorded in
 //! `unobserved`. An unobserved path covers itself and everything below it.
@@ -25,12 +28,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
-
-/// Top-level names under the workdir that belong to the runtime, not to
-/// the task. They are excluded from checkpoints, rollback and effects.
-/// `trace.jsonl` is the CLI's execution history; restoring it on rollback
-/// would erase the record of what happened during the task.
-pub const INTERNAL_PATHS: &[&str] = &[".v9r", "trace.jsonl"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +46,10 @@ pub struct ContentHash([u8; 32]);
 impl ContentHash {
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
+    }
+
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     pub fn to_hex(&self) -> String {
@@ -279,9 +280,6 @@ where
             });
             continue;
         };
-        if is_root && INTERNAL_PATHS.contains(&name_str) {
-            continue;
-        }
         let rel = join_rel(dir_rel, name_str);
         let abs = dir.join(&name);
         let meta = match fs::symlink_metadata(&abs) {
@@ -435,16 +433,16 @@ mod tests {
     }
 
     #[test]
-    fn excludes_internal_paths_only_at_top_level() {
-        let tmp = TempDir::new("internal");
-        fs::create_dir_all(tmp.0.join(".v9r/backups")).unwrap();
-        fs::write(tmp.0.join(".v9r/backups/x"), "x").unwrap();
+    fn observes_every_name_in_the_workspace() {
+        // Runtime state no longer lives in the workspace, so nothing is
+        // excluded: a `.v9r` or `trace.jsonl` here is task content.
+        let tmp = TempDir::new("no-exclusions");
+        fs::create_dir_all(tmp.0.join(".v9r")).unwrap();
+        fs::write(tmp.0.join(".v9r/x"), "x").unwrap();
         fs::write(tmp.0.join("trace.jsonl"), "{}").unwrap();
-        fs::create_dir_all(tmp.0.join("sub")).unwrap();
-        fs::write(tmp.0.join("sub/trace.jsonl"), "agent file").unwrap();
         let state = observe(&tmp.0).unwrap();
         let keys: Vec<_> = state.entries().keys().cloned().collect();
-        assert_eq!(keys, ["sub", "sub/trace.jsonl"]);
+        assert_eq!(keys, [".v9r", ".v9r/x", "trace.jsonl"]);
     }
 
     #[cfg(unix)]

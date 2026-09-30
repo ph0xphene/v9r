@@ -7,6 +7,7 @@ use crate::bundle::{self, ArtifactHash, BundleError};
 use crate::context::{ContextError, TaskSnapshot};
 use crate::manifest::Manifest;
 use crate::trace::TraceLogger;
+use crate::trusted::StateRoot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -89,8 +90,9 @@ impl Task {
         data: &[u8],
         new_manifest: Manifest,
         new_workdir: PathBuf,
+        state_root: &StateRoot,
     ) -> Result<Self, BundleError> {
-        bundle::import_bundle(data, new_manifest, new_workdir)
+        bundle::import_bundle(data, new_manifest, new_workdir, state_root)
     }
 
     pub fn record_tool_call(&mut self) -> anyhow::Result<()> {

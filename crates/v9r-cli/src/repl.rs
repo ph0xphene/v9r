@@ -159,7 +159,7 @@ impl ReplSession {
             .clone()
             .ok_or_else(|| anyhow!("run: no manifest loaded"))?;
         eprintln!(
-            "[INFO] rollback policy: restore modified files from .v9r/backups; delete only files created during this transaction"
+            "[INFO] rollback policy: restore modified files from the trusted checkpoint; delete only files created during this transaction"
         );
         run(RunArgs {
             task: Some(task),

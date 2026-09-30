@@ -11,7 +11,8 @@ use v9r_core::execution::{run_task_step, CommandSpec};
 use v9r_core::manifest::{normalize_path, Manifest};
 use v9r_core::task::{Task, TaskReport};
 use v9r_core::trace::{TaskEvent, TraceLogger};
-use v9r_core::vfs::{checkpoint, ensure_safe_directory, register_task, rollback};
+use v9r_core::trusted::StateRoot;
+use v9r_core::vfs::{checkpoint, ensure_safe_directory, register_task_with_state, rollback};
 
 mod repl;
 
@@ -64,6 +65,8 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let manifest = normalize_manifest_paths(load_manifest(&manifest_path)?, &workdir);
 
     ensure_safe_directory(&workdir)?;
+    let state_root = StateRoot::from_env()?;
+    log_info(&format!("trusted state: {}", state_root.path().display()));
 
     log_info(&format!(
         "manifest: allow_read={}, allow_write={}, allow_exec={}",
@@ -96,15 +99,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         .with_context(|| format!("write task file: {}", workdir.join("task.txt").display()))?;
 
     let mut task = if let Some(data) = imported_bundle {
-        Task::from_bundle(&data, manifest, workdir.clone())?
+        Task::from_bundle(&data, manifest, workdir.clone(), &state_root)?
     } else {
         let task = Task::new(manifest, workdir.clone());
-        register_task(task.id, workdir.clone());
+        register_task_with_state(task.id, workdir.clone(), state_root.clone())?;
         task
     };
     log_info(&format!("task started: task_id={}", task.id));
 
-    let trace = TraceLogger::new(workdir.join("trace.jsonl")).await?;
+    state_root.ensure_task_dir(task.id)?;
+    let trace = TraceLogger::for_task(&state_root, task.id).await?;
     if !stdin_is_pipe {
         trace
             .log_event(TaskEvent::task_started(task.manifest.clone()))
