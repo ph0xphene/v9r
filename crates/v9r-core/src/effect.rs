@@ -88,6 +88,15 @@ impl Observation {
         Ok(Self { root, state })
     }
 
+    /// Wrap a state produced by a live scan of `root` in this process
+    /// (the checkpoint walk). Never call this on deserialized state.
+    pub(crate) fn from_live_scan(root: &Path, state: FsState) -> Self {
+        Self {
+            root: normalize_path(root),
+            state,
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -268,6 +277,13 @@ pub enum SemanticAssessment {
 pub trait SemanticOracle {
     fn name(&self) -> &str;
     fn assess(&self, requested: &str, receipt: &EffectReceipt) -> Option<SemanticEvidence>;
+
+    /// Confidence (basis points) that `fact` holds. The runtime wraps the
+    /// answer as `Semantic` evidence about exactly this fact; an oracle
+    /// cannot choose the fact, the class, or produce `Verified`.
+    fn confidence(&self, _fact: &crate::facts::RuntimeFact) -> Option<u16> {
+        None
+    }
 }
 
 /// The default: no semantic interpretation.

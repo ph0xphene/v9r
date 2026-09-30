@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::effect::ReceiptRecord;
+use crate::kernel::DecisionRecord;
 use crate::manifest::{AccessType, Manifest};
 use crate::state::ContentHash;
 use crate::task::TaskStatus;
@@ -52,6 +53,10 @@ pub enum TaskEvent {
     /// of observed pre/post state; see `crate::effect`.
     EffectObserved {
         receipt: Box<ReceiptRecord>,
+    },
+    /// An invariant-kernel decision on the guarded path.
+    InvariantDecision {
+        record: Box<DecisionRecord>,
     },
 }
 

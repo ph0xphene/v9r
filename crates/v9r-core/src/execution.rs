@@ -143,7 +143,23 @@ pub async fn run_observed_step(
     trace: &TraceLogger,
 ) -> Result<ObservedStep> {
     let root = normalize_path(&task.workdir);
-    let pre = observe_blocking(root.clone()).await?;
+    let pre = observe_blocking(root).await?;
+    Ok(run_observed_from(task, command, requested, trace, &pre)
+        .await?
+        .0)
+}
+
+/// Body of [`run_observed_step`] with a caller-supplied pre-observation.
+/// Also returns the post-observation, if it succeeded, so callers that
+/// derive further evidence from it need not rescan.
+pub(crate) async fn run_observed_from(
+    task: &mut Task,
+    command: CommandSpec,
+    requested: Option<String>,
+    trace: &TraceLogger,
+    pre: &Observation,
+) -> Result<(ObservedStep, Option<Observation>)> {
+    let root = pre.root().to_path_buf();
     let action = Action::Command {
         argv: std::iter::once(command.program.clone())
             .chain(command.args.iter().cloned())
@@ -172,17 +188,22 @@ pub async fn run_observed_step(
     };
 
     let post = observe_blocking(root).await;
-    let post = post.as_ref().map_err(ToString::to_string);
-    let receipt = EffectReceipt::from_observations(action, requested, outcome, &pre, post);
+    let receipt = EffectReceipt::from_observations(
+        action,
+        requested,
+        outcome,
+        pre,
+        post.as_ref().map_err(ToString::to_string),
+    );
     trace
         .log_event(TaskEvent::EffectObserved {
             receipt: Box::new(receipt.to_record()),
         })
         .await?;
-    Ok(ObservedStep { result, receipt })
+    Ok((ObservedStep { result, receipt }, post.ok()))
 }
 
-async fn observe_blocking(root: PathBuf) -> Result<Observation> {
+pub(crate) async fn observe_blocking(root: PathBuf) -> Result<Observation> {
     tokio::task::spawn_blocking(move || Observation::capture(&root))
         .await
         .map_err(|err| ExecutionError::Join(err.to_string()))?

@@ -325,6 +325,39 @@ impl<S, V> Decision<S, V> {
     }
 }
 
+/// Domain-free summary of a decision, for the trace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    pub action: String,
+    pub phase: Phase,
+    pub verdict: Verdict,
+    pub findings: Vec<FindingRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingRecord {
+    pub invariant: String,
+    pub status: Status,
+}
+
+impl<S, V> Decision<S, V> {
+    pub fn record(&self, action: impl Into<String>) -> DecisionRecord {
+        DecisionRecord {
+            action: action.into(),
+            phase: self.phase,
+            verdict: self.verdict,
+            findings: self
+                .findings
+                .iter()
+                .map(|f| FindingRecord {
+                    invariant: f.obligation.invariant.clone(),
+                    status: f.status.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 impl<S, V> fmt::Display for Decision<S, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?} {:?}", self.phase, self.verdict)?;
