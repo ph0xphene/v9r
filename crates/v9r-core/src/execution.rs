@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use crate::effect::{Action, EffectReceipt, ExecutionOutcome, Observation};
 use crate::manifest::{normalize_path, AccessType};
+use crate::state::ObserveError;
 use crate::task::{Task, TaskStatus};
 use crate::trace::{TaskEvent, TraceLogger};
 use crate::vfs;
@@ -39,6 +41,8 @@ pub enum ExecutionError {
     Io { program: String, source: io::Error },
     #[error("trace: {0}")]
     Trace(#[from] crate::trace::TraceError),
+    #[error("observation: {0}")]
+    Observation(#[from] ObserveError),
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;
@@ -114,6 +118,75 @@ pub async fn run_task_step(
         .await?;
 
     Ok(step_output)
+}
+
+/// A step run between two observations of the workdir. `result` is the
+/// command's own report; `receipt` is what the filesystem shows. Neither
+/// is derived from the other.
+#[derive(Debug)]
+pub struct ObservedStep {
+    pub result: Result<StepOutput>,
+    pub receipt: EffectReceipt,
+}
+
+/// Run `command` like [`run_task_step`], bracketed by pre/post
+/// observations of the workdir, and log the resulting receipt as a
+/// `TaskEvent::EffectObserved`.
+///
+/// Returns `Err` only if the pre-observation fails (nothing is executed
+/// then) or the receipt cannot be written to the trace. A failed command
+/// is reported inside `ObservedStep::result`, with its receipt.
+pub async fn run_observed_step(
+    task: &mut Task,
+    command: CommandSpec,
+    requested: Option<String>,
+    trace: &TraceLogger,
+) -> Result<ObservedStep> {
+    let root = normalize_path(&task.workdir);
+    let pre = observe_blocking(root.clone()).await?;
+    let action = Action::Command {
+        argv: std::iter::once(command.program.clone())
+            .chain(command.args.iter().cloned())
+            .collect(),
+        declared_writes: command.writes.clone(),
+    };
+
+    let result = run_task_step(task, command, trace).await;
+    let outcome = match &result {
+        Ok(output) => match output.status_code {
+            Some(code) => ExecutionOutcome::Exited { code },
+            None => ExecutionOutcome::Terminated,
+        },
+        Err(
+            err @ (ExecutionError::MaxStepsExceeded(_)
+            | ExecutionError::Violation(_)
+            | ExecutionError::Transaction(_)
+            | ExecutionError::Io { .. }),
+        ) => ExecutionOutcome::NotStarted {
+            reason: err.to_string(),
+        },
+        // A trace failure may happen before or after the spawn.
+        Err(err) => ExecutionOutcome::Unknown {
+            reason: err.to_string(),
+        },
+    };
+
+    let post = observe_blocking(root).await;
+    let post = post.as_ref().map_err(ToString::to_string);
+    let receipt = EffectReceipt::from_observations(action, requested, outcome, &pre, post);
+    trace
+        .log_event(TaskEvent::EffectObserved {
+            receipt: Box::new(receipt.to_record()),
+        })
+        .await?;
+    Ok(ObservedStep { result, receipt })
+}
+
+async fn observe_blocking(root: PathBuf) -> Result<Observation> {
+    tokio::task::spawn_blocking(move || Observation::capture(&root))
+        .await
+        .map_err(|err| ExecutionError::Join(err.to_string()))?
+        .map_err(Into::into)
 }
 
 async fn check_manifest(

@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::effect::ReceiptRecord;
 use crate::manifest::{AccessType, Manifest};
 use crate::task::TaskStatus;
 use crate::vfs::CheckpointId;
@@ -42,6 +43,12 @@ pub enum TaskEvent {
     TaskHandoverReceived {
         timestamp: DateTime<Utc>,
         source_task_id: Uuid,
+    },
+    /// Derived claim about the state transition across one action. Unlike
+    /// `CommandExecuted`, this is not execution history but a comparison
+    /// of observed pre/post state; see `crate::effect`.
+    EffectObserved {
+        receipt: Box<ReceiptRecord>,
     },
 }
 

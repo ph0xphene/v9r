@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::effect::{Action, EffectReceipt, ExecutionOutcome, Observation};
 use crate::state::{self, ContentHash, Entry, EntryKind, FsState, ObserveError};
 use crate::trace::{TaskEvent, TraceLogger};
 
@@ -209,6 +210,57 @@ pub async fn rollback(task_id: Uuid, checkpoint: CheckpointId, trace: &TraceLogg
         .log_event(TaskEvent::RollbackPerformed { id: checkpoint })
         .await?;
     Ok(())
+}
+
+/// A rollback bracketed by observations. The receipt's effects are the
+/// changes the rollback itself made; effects observed during the task
+/// remain in their own receipts and are not erased by this.
+#[derive(Debug)]
+pub struct ObservedRollback {
+    pub result: Result<()>,
+    pub receipt: EffectReceipt,
+}
+
+/// Like [`rollback`], but also logs a `TaskEvent::EffectObserved` for the
+/// rollback. Returns `Err` only if the pre-observation or the trace write
+/// fails; a failed rollback is reported in `ObservedRollback::result`.
+pub async fn rollback_observed(
+    task_id: Uuid,
+    checkpoint: CheckpointId,
+    trace: &TraceLogger,
+) -> Result<ObservedRollback> {
+    let workdir = registered_workdir(task_id, false)?;
+    let capture = |root: PathBuf| async move {
+        tokio::task::spawn_blocking(move || Observation::capture(&root))
+            .await
+            .map_err(|err| TransactionError::Join(err.to_string()))
+    };
+    let pre = capture(workdir.clone()).await??;
+    let result = rollback(task_id, checkpoint, trace).await;
+    let outcome = match &result {
+        Ok(()) => ExecutionOutcome::Completed,
+        Err(err) => ExecutionOutcome::Failed {
+            reason: err.to_string(),
+        },
+    };
+    let post = match capture(workdir).await {
+        Ok(Ok(post)) => Ok(post),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(err) => Err(err.to_string()),
+    };
+    let receipt = EffectReceipt::from_observations(
+        Action::Rollback { checkpoint },
+        None,
+        outcome,
+        &pre,
+        post.as_ref().map_err(Clone::clone),
+    );
+    trace
+        .log_event(TaskEvent::EffectObserved {
+            receipt: Box::new(receipt.to_record()),
+        })
+        .await?;
+    Ok(ObservedRollback { result, receipt })
 }
 
 fn checkpoint_untraced(task_id: Uuid) -> Result<CheckpointId> {

@@ -3,6 +3,7 @@
 pub mod adapter;
 pub mod bundle;
 pub mod context;
+pub mod effect;
 pub mod execution;
 pub mod manifest;
 pub mod state;
