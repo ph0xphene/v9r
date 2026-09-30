@@ -1,17 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::state::{self, ContentHash, Entry, EntryKind, FsState, ObserveError};
 use crate::trace::{TaskEvent, TraceLogger};
 
 const V9R_DIR: &str = ".v9r";
 const BACKUPS_DIR: &str = "backups";
 const SNAPSHOT_MANIFEST: &str = "manifest.json";
+const SNAPSHOT_MANIFEST_VERSION: u32 = 2;
 const SAFETY_ERROR: &str = "Safety Error: Cannot use a project root (or a subfolder of one) as a mutable workdir. Place the workdir somewhere outside any version-controlled tree, or opt in by creating a `.v9r-workdir` file inside it.";
 
 /// Files/dirs that mark `dir` as a project root. `.git` is checked by
@@ -50,12 +52,22 @@ pub enum TransactionError {
     SymlinkUnsupported(PathBuf),
     #[error("{0}")]
     Safety(String),
+    #[error("cannot observe {path}: {reason}")]
+    Unobservable { path: PathBuf, reason: String },
     #[error("io at {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
     #[error("checkpoint worker failed: {0}")]
     Join(String),
     #[error("trace: {0}")]
     Trace(#[from] crate::trace::TraceError),
+}
+
+impl From<ObserveError> for TransactionError {
+    fn from(err: ObserveError) -> Self {
+        match err {
+            ObserveError::Io { path, source } => TransactionError::Io { path, source },
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, TransactionError>;
@@ -66,17 +78,13 @@ struct TaskFsState {
     blocked: bool,
 }
 
+/// On-disk checkpoint manifest. Version 1 (`files`/`dirs` with FNV-64)
+/// is no longer read: FNV-64 is not collision resistant, so a crafted
+/// modification could make rollback skip a file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SnapshotManifest {
-    files: Vec<SnapshotFile>,
-    dirs: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SnapshotFile {
-    relative_path: PathBuf,
-    bytes: u64,
-    fnv64: u64,
+    version: u32,
+    state: FsState,
 }
 
 static TASKS: OnceLock<Mutex<HashMap<Uuid, TaskFsState>>> = OnceLock::new();
@@ -212,7 +220,13 @@ fn checkpoint_untraced(task_id: Uuid) -> Result<CheckpointId> {
 
     remove_dir_if_exists(&tmp_path)?;
     create_dir_all(&tmp_path)?;
-    let manifest = backup_workdir(&workdir, &tmp_path)?;
+    let manifest = match backup_workdir(&workdir, &tmp_path) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&tmp_path);
+            return Err(err);
+        }
+    };
     write_snapshot_manifest(&tmp_path, &manifest)?;
     if let Some(parent) = backup_dir.parent() {
         create_dir_all(parent)?;
@@ -271,206 +285,178 @@ fn backup_dir(workdir: &Path, task_id: Uuid, checkpoint: CheckpointId) -> PathBu
 }
 
 fn backup_workdir(workdir: &Path, backup_dir: &Path) -> Result<SnapshotManifest> {
-    let mut manifest = SnapshotManifest {
-        files: Vec::new(),
-        dirs: Vec::new(),
-    };
-    backup_dir_entries(workdir, workdir, backup_dir, &mut manifest)?;
-    manifest
-        .files
-        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    manifest.dirs.sort();
-    Ok(manifest)
-}
-
-fn backup_dir_entries(
-    root: &Path,
-    dir: &Path,
-    backup_dir: &Path,
-    manifest: &mut SnapshotManifest,
-) -> Result<()> {
-    for entry in fs::read_dir(dir).map_err(|source| TransactionError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| TransactionError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let src_path = entry.path();
-        let metadata = fs::symlink_metadata(&src_path).map_err(|source| TransactionError::Io {
-            path: src_path.clone(),
-            source,
-        })?;
-
-        if metadata.file_type().is_symlink() {
-            return Err(TransactionError::SymlinkUnsupported(src_path));
-        }
-        let relative_path = src_path
-            .strip_prefix(root)
-            .map_err(|_| {
-                TransactionError::Safety(format!(
-                    "path escaped snapshot root: {}",
-                    src_path.display()
-                ))
-            })?
-            .to_path_buf();
-        if relative_path
-            .components()
-            .next()
-            .is_some_and(|component| component.as_os_str() == V9R_DIR)
-        {
-            continue;
-        }
-        if metadata.is_dir() {
-            manifest.dirs.push(relative_path);
-            backup_dir_entries(root, &src_path, backup_dir, manifest)?;
-        } else if metadata.is_file() {
-            let bytes = fs::read(&src_path).map_err(|source| TransactionError::Io {
-                path: src_path.clone(),
+    // One pass: the bytes written to the backup are exactly the bytes
+    // whose hash lands in the manifest.
+    let state = state::observe_with(workdir, |relative_path, bytes| {
+        let dst_path = backup_dir.join(relative_path);
+        if let Some(parent) = dst_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ObserveError::Io {
+                path: parent.to_path_buf(),
                 source,
             })?;
-            let dst_path = backup_dir.join(&relative_path);
-            if let Some(parent) = dst_path.parent() {
-                create_dir_all(parent)?;
-            }
-            fs::write(&dst_path, &bytes).map_err(|source| TransactionError::Io {
-                path: dst_path,
-                source,
-            })?;
-            manifest.files.push(SnapshotFile {
-                relative_path,
-                bytes: bytes.len() as u64,
-                fnv64: fnv64(&bytes),
-            });
         }
+        fs::write(&dst_path, bytes).map_err(|source| ObserveError::Io {
+            path: dst_path,
+            source,
+        })
+    })?;
+    if let Some((path, _)) = state
+        .entries()
+        .iter()
+        .find(|(_, entry)| entry.kind == EntryKind::Symlink)
+    {
+        return Err(TransactionError::SymlinkUnsupported(workdir.join(path)));
     }
-    Ok(())
+    if let Some(unobserved) = state.unobserved().first() {
+        return Err(TransactionError::Unobservable {
+            path: workdir.join(&unobserved.path),
+            reason: unobserved.reason.clone(),
+        });
+    }
+    Ok(SnapshotManifest {
+        version: SNAPSHOT_MANIFEST_VERSION,
+        state,
+    })
 }
 
+/// Restore the workdir to the checkpointed state, touching only paths
+/// whose observable state differs from the snapshot.
+///
+/// Order matters for safety:
+///   1. every non-directory that differs from the snapshot is unlinked
+///      (this includes symlinks and FIFOs the task created — unlinking a
+///      symlink never touches its target);
+///   2. directories not in the snapshot are removed deepest-first, but
+///      only when already empty (`remove_dir`, never `remove_dir_all`);
+///   3. snapshot directories and files are recreated parent-first, files
+///      via `create_new` (`O_EXCL`), which refuses to write through any
+///      symlink that raced into place.
+///
+/// After step 1 no symlink remains under the workdir, so step 3 cannot
+/// be redirected outside it by a planted link.
 fn selective_rollback(
     workdir: &Path,
     backup_dir: &Path,
     manifest: &SnapshotManifest,
 ) -> Result<()> {
+    if manifest.version != SNAPSHOT_MANIFEST_VERSION {
+        return Err(TransactionError::Safety(format!(
+            "unsupported snapshot manifest version: {}",
+            manifest.version
+        )));
+    }
     // Validate every relative path in the manifest BEFORE any join, so a
     // tampered manifest can't smuggle `..` into a delete-or-restore path.
-    for file in &manifest.files {
-        safe_relative_path(&file.relative_path)?;
-    }
-    for dir in &manifest.dirs {
-        safe_relative_path(dir)?;
+    let snapshot = &manifest.state;
+    for (relative_path, entry) in snapshot.entries() {
+        safe_relative_path(Path::new(relative_path))?;
+        if entry.kind == EntryKind::Symlink {
+            return Err(TransactionError::Safety(format!(
+                "snapshot manifest contains a symlink: {relative_path}"
+            )));
+        }
     }
 
-    let original_files: HashSet<PathBuf> = manifest
-        .files
-        .iter()
-        .map(|file| file.relative_path.clone())
-        .collect();
-    let original_dirs: HashSet<PathBuf> = manifest.dirs.iter().cloned().collect();
-    let mut current_files = Vec::new();
-    let mut current_dirs = Vec::new();
-    collect_current_entries(workdir, workdir, &mut current_files, &mut current_dirs)?;
+    let current = state::observe(workdir)?;
+    if let Some(unobserved) = current.unobserved().first() {
+        return Err(TransactionError::Unobservable {
+            path: workdir.join(&unobserved.path),
+            reason: unobserved.reason.clone(),
+        });
+    }
 
-    for relative_path in &current_files {
-        // `current_files` came from `collect_current_entries` which already
-        // strip-prefixes against `workdir`. Belt-and-suspenders: re-validate.
-        safe_relative_path(relative_path)?;
+    // Verify every backup we will need before mutating anything, so a
+    // corrupted checkpoint fails closed instead of half-restoring.
+    for (relative_path, original) in snapshot.entries() {
+        if original.kind == EntryKind::File && current.get(relative_path) != Some(original) {
+            load_backup(backup_dir, relative_path, original)?;
+        }
+    }
+
+    let mut stray_dirs = Vec::new();
+    for (relative_path, entry) in current.entries() {
+        // `current` came from our own walk, which only yields plain
+        // segments. Belt-and-suspenders: re-validate.
+        safe_relative_path(Path::new(relative_path))?;
         let path = workdir.join(relative_path);
-        if !original_files.contains(relative_path) {
+        let original = snapshot.get(relative_path);
+        if entry.kind == EntryKind::Dir {
+            if original.map(|e| e.kind) != Some(EntryKind::Dir) {
+                stray_dirs.push(path);
+            }
+        } else if original != Some(entry) {
             remove_file_if_exists(&path)?;
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|source| TransactionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let Some(snapshot) = manifest
-            .files
-            .iter()
-            .find(|file| &file.relative_path == relative_path)
-        else {
-            continue;
-        };
-        if bytes.len() as u64 != snapshot.bytes || fnv64(&bytes) != snapshot.fnv64 {
-            restore_file(workdir, backup_dir, relative_path)?;
         }
     }
 
-    for snapshot in &manifest.files {
-        let path = workdir.join(&snapshot.relative_path);
-        if !path.exists() {
-            restore_file(workdir, backup_dir, &snapshot.relative_path)?;
-        }
+    stray_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for path in stray_dirs {
+        // A non-empty dir we don't know about is left alone rather than
+        // recursively wiped.
+        let _ = fs::remove_dir(&path);
     }
 
-    current_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for relative_path in current_dirs {
-        safe_relative_path(&relative_path)?;
-        if !original_dirs.contains(&relative_path) {
-            let path = workdir.join(relative_path);
-            // `fs::remove_dir` (not `remove_dir_all`) — only succeeds on
-            // empty dirs, so a non-empty dir we don't know about is left
-            // alone rather than recursively wiped.
-            let _ = fs::remove_dir(&path);
+    for (relative_path, original) in snapshot.entries() {
+        let path = workdir.join(relative_path);
+        match original.kind {
+            EntryKind::Dir => match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(source)
+                    if source.kind() == io::ErrorKind::AlreadyExists
+                        && fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) => {}
+                Err(source) => return Err(TransactionError::Io { path, source }),
+            },
+            EntryKind::File => {
+                if current.get(relative_path) != Some(original) {
+                    restore_file(workdir, backup_dir, relative_path, original)?;
+                }
+            }
+            // Special files cannot be restored from a backup; they were
+            // never copied. Symlinks were rejected above.
+            EntryKind::Other | EntryKind::Symlink => {}
         }
     }
     Ok(())
 }
 
-fn collect_current_entries(
-    root: &Path,
-    dir: &Path,
-    files: &mut Vec<PathBuf>,
-    dirs: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for entry in fs::read_dir(dir).map_err(|source| TransactionError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| TransactionError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|source| TransactionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let relative_path = path
-            .strip_prefix(root)
-            .map_err(|_| {
-                TransactionError::Safety(format!("path escaped rollback root: {}", path.display()))
-            })?
-            .to_path_buf();
-        if relative_path
-            .components()
-            .next()
-            .is_some_and(|component| component.as_os_str() == V9R_DIR)
-        {
-            continue;
-        }
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            dirs.push(relative_path);
-            collect_current_entries(root, &path, files, dirs)?;
-        } else if metadata.is_file() {
-            files.push(relative_path);
-        }
-    }
-    Ok(())
-}
-
-fn restore_file(workdir: &Path, backup_dir: &Path, relative_path: &Path) -> Result<()> {
+/// Read a backup copy and check it against the manifest entry. The
+/// backup lives inside the workdir, so it is not trusted blindly.
+fn load_backup(backup_dir: &Path, relative_path: &str, original: &Entry) -> Result<Vec<u8>> {
     let src = backup_dir.join(relative_path);
-    let dst = workdir.join(relative_path);
-    if let Some(parent) = dst.parent() {
-        create_dir_all(parent)?;
+    let src_meta = fs::symlink_metadata(&src).map_err(|source| TransactionError::Io {
+        path: src.clone(),
+        source,
+    })?;
+    let bytes = state::read_file_stable(&src, &src_meta)
+        .map_err(|reason| TransactionError::Unobservable { path: src, reason })?;
+    if original.len != Some(bytes.len() as u64) || original.sha256 != Some(ContentHash::of(&bytes))
+    {
+        return Err(TransactionError::Safety(format!(
+            "checkpoint backup does not match its manifest: {relative_path}"
+        )));
     }
-    fs::copy(&src, &dst).map_err(|source| TransactionError::Io { path: src, source })?;
-    Ok(())
+    Ok(bytes)
+}
+
+fn restore_file(
+    workdir: &Path,
+    backup_dir: &Path,
+    relative_path: &str,
+    original: &Entry,
+) -> Result<()> {
+    let bytes = load_backup(backup_dir, relative_path, original)?;
+    let dst = workdir.join(relative_path);
+    remove_file_if_exists(&dst)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dst)
+        .map_err(|source| TransactionError::Io {
+            path: dst.clone(),
+            source,
+        })?;
+    file.write_all(&bytes)
+        .map_err(|source| TransactionError::Io { path: dst, source })
 }
 
 fn write_snapshot_manifest(backup_dir: &Path, manifest: &SnapshotManifest) -> Result<()> {
@@ -526,15 +512,6 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
             source,
         }),
     }
-}
-
-fn fnv64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 #[cfg(test)]
@@ -667,17 +644,167 @@ mod tests {
 
         // Forge a manifest with a `..` path.
         let backup = backup_dir(&dir, task_id, checkpoint);
+        let mut state = FsState::default();
+        state.entries.insert(
+            "../escape.txt".to_string(),
+            Entry {
+                kind: EntryKind::File,
+                len: Some(0),
+                sha256: Some(ContentHash::of(b"")),
+                link_target: None,
+            },
+        );
         let bad = SnapshotManifest {
-            files: vec![SnapshotFile {
-                relative_path: PathBuf::from("../escape.txt"),
-                bytes: 0,
-                fnv64: 0,
-            }],
-            dirs: Vec::new(),
+            version: SNAPSHOT_MANIFEST_VERSION,
+            state,
         };
         write_snapshot_manifest(&backup, &bad).unwrap();
 
         let err = rollback_untraced(task_id, checkpoint).unwrap_err();
         assert!(matches!(err, TransactionError::Safety(_)));
+    }
+
+    #[test]
+    fn rollback_preserves_trace_history_written_after_checkpoint() {
+        // Regression: `trace.jsonl` used to be part of the snapshot, so a
+        // rollback restored it to its checkpoint-time content and erased
+        // every event logged during the task.
+        let dir = temp_dir("trace-history");
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::write(dir.join("trace.jsonl"), "before\n").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::write(dir.join("trace.jsonl"), "before\nevidence\n").unwrap();
+        fs::write(dir.join("new.txt"), "x").unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("trace.jsonl")).unwrap(),
+            "before\nevidence\n"
+        );
+        assert!(!dir.join("new.txt").exists());
+    }
+
+    #[test]
+    fn rollback_restores_file_replaced_by_directory() {
+        // Regression: `path.exists()` was true for the directory, so the
+        // original file was never restored.
+        let dir = temp_dir("file-to-dir");
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::write(dir.join("a"), "orig").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::remove_file(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("a/nested")).unwrap();
+        fs::write(dir.join("a/nested/inner"), "x").unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), "orig");
+    }
+
+    #[test]
+    fn rollback_restores_directory_replaced_by_file() {
+        let dir = temp_dir("dir-to-file");
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::create_dir_all(dir.join("d")).unwrap();
+        fs::write(dir.join("d/x"), "x").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::remove_dir_all(dir.join("d")).unwrap();
+        fs::write(dir.join("d"), "now a file").unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("d/x")).unwrap(), "x");
+    }
+
+    #[test]
+    fn rollback_recreates_deleted_empty_directory() {
+        // Regression: snapshot dirs were only used to decide what not to
+        // delete, never restored.
+        let dir = temp_dir("empty-dir");
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::create_dir_all(dir.join("empty/inner")).unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::remove_dir_all(dir.join("empty")).unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert!(dir.join("empty/inner").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_never_writes_through_planted_symlink() {
+        // Regression: a dangling symlink planted at a snapshotted path made
+        // `path.exists()` false, and `fs::copy` then followed the link and
+        // created the target outside the workdir.
+        let dir = temp_dir("planted-link");
+        let outside = temp_dir("planted-link-outside").join("victim.txt");
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::write(dir.join("a.txt"), "orig").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::remove_file(dir.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("a.txt")).unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert!(!outside.exists(), "rollback wrote outside the workdir");
+        let meta = fs::symlink_metadata(dir.join("a.txt")).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "orig");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_removes_symlinks_created_by_task_without_touching_targets() {
+        // Regression: task-created symlinks were skipped and survived
+        // rollback, including one masking an original file.
+        let dir = temp_dir("task-links");
+        let outside = temp_dir("task-links-outside");
+        fs::write(outside.join("target.txt"), "outside").unwrap();
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::write(dir.join("orig.txt"), "orig").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::remove_file(dir.join("orig.txt")).unwrap();
+        std::os::unix::fs::symlink(outside.join("target.txt"), dir.join("orig.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("dirlink")).unwrap();
+
+        rollback_untraced(task_id, checkpoint).unwrap();
+
+        assert!(fs::symlink_metadata(dir.join("dirlink")).is_err());
+        assert_eq!(fs::read_to_string(dir.join("orig.txt")).unwrap(), "orig");
+        assert!(fs::symlink_metadata(dir.join("orig.txt"))
+            .unwrap()
+            .is_file());
+        assert_eq!(
+            fs::read_to_string(outside.join("target.txt")).unwrap(),
+            "outside"
+        );
+    }
+
+    #[test]
+    fn rollback_refuses_backup_that_does_not_match_manifest() {
+        let dir = temp_dir("tampered-backup");
+        let task_id = Uuid::new_v4();
+        register_task(task_id, dir.clone());
+        fs::write(dir.join("a.txt"), "orig").unwrap();
+        let checkpoint = checkpoint_untraced(task_id).unwrap();
+        fs::write(dir.join("a.txt"), "changed").unwrap();
+        let backup = backup_dir(&dir, task_id, checkpoint);
+        fs::write(backup.join("a.txt"), "forged").unwrap();
+
+        fs::write(dir.join("new.txt"), "new").unwrap();
+
+        let err = rollback_untraced(task_id, checkpoint).unwrap_err();
+        assert!(matches!(err, TransactionError::Safety(_)), "{err}");
+        // Fails closed: nothing was touched.
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
+        assert!(dir.join("new.txt").exists());
     }
 }
