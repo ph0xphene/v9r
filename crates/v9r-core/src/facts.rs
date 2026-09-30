@@ -89,7 +89,7 @@ pub(crate) fn from_observation<'a>(
     evidence: &mut RuntimeEvidence,
 ) {
     let state = observation.state();
-    let digest = state.digest();
+    let digest = observation.digest();
     let provenance = Provenance {
         observer: "workspace-observation".to_string(),
         basis: digest.to_string(),

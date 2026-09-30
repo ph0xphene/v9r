@@ -79,13 +79,21 @@ pub enum Epistemic {
 pub struct Observation {
     root: PathBuf,
     state: FsState,
+    /// `state.digest()`, computed once: it is O(entries) and needed
+    /// several times per step.
+    digest: ContentHash,
 }
 
 impl Observation {
     pub fn capture(root: &Path) -> Result<Self, ObserveError> {
         let root = normalize_path(root);
         let state = state::observe(&root)?;
-        Ok(Self { root, state })
+        let digest = state.digest();
+        Ok(Self {
+            root,
+            state,
+            digest,
+        })
     }
 
     /// Wrap a state produced by a live scan of `root` in this process
@@ -93,6 +101,7 @@ impl Observation {
     pub(crate) fn from_live_scan(root: &Path, state: FsState) -> Self {
         Self {
             root: normalize_path(root),
+            digest: state.digest(),
             state,
         }
     }
@@ -103,6 +112,11 @@ impl Observation {
 
     pub fn state(&self) -> &FsState {
         &self.state
+    }
+
+    /// Digest of the observed state (the workspace "version").
+    pub fn digest(&self) -> ContentHash {
+        self.digest
     }
 }
 
@@ -333,7 +347,7 @@ impl EffectReceipt {
             Ok(post) if post.root == pre.root => {
                 let delta = diff(&pre.state, &post.state);
                 (
-                    Some(post.state.digest()),
+                    Some(post.digest),
                     delta.effects.into_iter().map(Verified::attest).collect(),
                     delta.unknown,
                 )
@@ -363,7 +377,7 @@ impl EffectReceipt {
             requested,
             outcome,
             scope,
-            pre_state: pre.state.digest(),
+            pre_state: pre.digest,
             post_state,
             verified,
             unknown,

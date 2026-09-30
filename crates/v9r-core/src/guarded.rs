@@ -201,7 +201,7 @@ impl GuardedTask {
 
     /// Digest of the last accepted workspace observation.
     pub fn version(&self) -> ContentHash {
-        self.current.state().digest()
+        self.current.digest()
     }
 
     pub fn is_accepting(&self) -> bool {
@@ -307,7 +307,7 @@ impl GuardedTask {
                 .await?;
                 if test_run {
                     if let Some((fact, provenance)) =
-                        facts::test_outcome(pre.state().digest(), step.receipt.outcome(), &label)
+                        facts::test_outcome(pre.digest(), step.receipt.outcome(), &label)
                     {
                         self.durable.add_verified(fact, provenance);
                     }
@@ -371,7 +371,7 @@ impl GuardedTask {
     /// own.
     pub async fn rollback(&mut self) -> Result<StepReport> {
         let rolled = vfs::rollback_observed(self.task.id, self.checkpoint, &self.trace).await?;
-        let checkpoint = self.checkpoint_observation.state().digest();
+        let checkpoint = self.checkpoint_observation.digest();
         let obligations = self.policy.obligations(&Context {
             manifest: self.policy.manifest(),
             workdir: &self.task.workdir,
