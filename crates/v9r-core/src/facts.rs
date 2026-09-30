@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::content;
 use crate::effect::{EffectReceipt, ExecutionOutcome, FsEffect, Observation, ReceiptRecord};
 use crate::kernel::{EvidenceBase, Fact, Name, Proposed, Provenance, Verified};
 use crate::state::{ContentHash, Entry, EntryKind};
@@ -40,6 +41,8 @@ pub enum Subject {
     TrustedState,
     /// Whether every workspace transition so far was accepted.
     Transitions,
+    /// Content manifest (`crate::content`) of a workspace directory.
+    ContentManifest(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +100,10 @@ pub(crate) fn from_observation<'a>(
     for subject in subjects {
         let value = match subject {
             Subject::Workspace => Value::Digest { sha256: digest },
+            Subject::ContentManifest(dir) => match content::from_fs_state(state, dir, &[]) {
+                Some(sha256) => Value::Digest { sha256 },
+                None => continue,
+            },
             Subject::Path(path) | Subject::Exists(path) => {
                 if state.unobserved_cover(path).is_some() {
                     continue;

@@ -2,10 +2,13 @@
 
 pub mod adapter;
 pub mod bundle;
+pub mod content;
 pub mod context;
 pub mod effect;
 pub mod execution;
 pub mod facts;
+pub mod git;
+pub mod git_guard;
 pub mod guarded;
 pub mod kernel;
 pub mod manifest;

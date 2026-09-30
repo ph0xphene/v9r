@@ -195,6 +195,56 @@ impl<S: Ord + Clone, V: PartialEq + Clone> EvidenceBase<S, V> {
         }
     }
 
+    /// Relabel evidence into another subject/value space, preserving each
+    /// item's class and provenance. Crate-private: relabeling verified
+    /// evidence is equivalent to attesting it, so only the trusted crate
+    /// may do it (used to compose domains under a sum type).
+    ///
+    /// ```compile_fail
+    /// // Outside the crate, verified evidence cannot be relabeled.
+    /// let e = v9r_core::facts::RuntimeEvidence::new();
+    /// let _ = e.map(|s| s.clone(), |v| v.clone());
+    /// ```
+    pub(crate) fn map<S2, V2>(
+        &self,
+        subject: impl Fn(&S) -> S2,
+        value: impl Fn(&V) -> V2,
+    ) -> EvidenceBase<S2, V2>
+    where
+        S2: Ord + Clone,
+        V2: PartialEq + Clone,
+    {
+        let mut out = EvidenceBase::new();
+        for (s, items) in &self.entries {
+            for item in items {
+                let mapped = match item {
+                    Evidence::Verified {
+                        value: v,
+                        provenance,
+                    } => Evidence::Verified {
+                        value: value(v),
+                        provenance: provenance.clone(),
+                    },
+                    Evidence::Semantic {
+                        value: v,
+                        source,
+                        confidence_bp,
+                    } => Evidence::Semantic {
+                        value: value(v),
+                        source: source.clone(),
+                        confidence_bp: *confidence_bp,
+                    },
+                    Evidence::Proposed { value: v, source } => Evidence::Proposed {
+                        value: value(v),
+                        source: source.clone(),
+                    },
+                };
+                out.insert(subject(s), mapped);
+            }
+        }
+        out
+    }
+
     /// Drop all evidence about subjects matching `pred` (used when the
     /// state they describe has been superseded).
     pub fn forget(&mut self, mut pred: impl FnMut(&S) -> bool) {
