@@ -61,19 +61,8 @@ use crate::manifest::normalize_path;
 use crate::state::{self, ContentHash, Entry, FsState, ObserveError};
 use crate::vfs::CheckpointId;
 
-/// A claim established by deterministic before/after observation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Verified<T>(T);
-
-impl<T> Verified<T> {
-    pub fn get(&self) -> &T {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
+/// Re-exported: the one authority type, defined by the kernel.
+pub use crate::kernel::Verified;
 
 /// Epistemic label used in persisted records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,7 +318,7 @@ impl EffectReceipt {
                 let delta = diff(&pre.state, &post.state);
                 (
                     Some(post.state.digest()),
-                    delta.effects.into_iter().map(Verified).collect(),
+                    delta.effects.into_iter().map(Verified::attest).collect(),
                     delta.unknown,
                 )
             }

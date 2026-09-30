@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod context;
 pub mod effect;
 pub mod execution;
+pub mod kernel;
 pub mod manifest;
 pub mod state;
 pub mod task;
