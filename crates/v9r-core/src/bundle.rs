@@ -12,6 +12,7 @@ use crate::vfs;
 
 const TRACE_FILE_NAME: &str = "trace.jsonl";
 const BUNDLE_VERSION: u32 = 1;
+const V9R_DIR: &str = ".v9r";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskBundle {
@@ -159,6 +160,11 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<BundleFile>) -> Result<(
         if metadata.file_type().is_symlink() {
             continue;
         }
+        // Runtime state (checkpoint backups) is not task output. Shipping
+        // it would also leak pre-task content the task deleted.
+        if dir == root && entry.file_name() == V9R_DIR {
+            continue;
+        }
         if metadata.is_dir() {
             collect_files(root, &path, out)?;
             continue;
@@ -253,6 +259,52 @@ fn fnv64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_excludes_checkpoint_backups() {
+        let dir = std::env::temp_dir().join(format!("v9r-bundle-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let manifest = Manifest {
+            allow_read: Vec::new(),
+            allow_write: Vec::new(),
+            allow_exec: Vec::new(),
+            token_limit: 1,
+            max_steps: 1,
+            timeout_ms: 1,
+            mandatory_artifacts: Vec::new(),
+            test_commands: Vec::new(),
+        };
+        let task = Task::new(manifest, dir.clone());
+        vfs::register_task(task.id, dir.clone());
+        fs::write(dir.join("secret.txt"), "deleted by task").unwrap();
+        fs::write(dir.join("keep.txt"), "kept").unwrap();
+        fs::create_dir_all(dir.join("sub/.v9r")).unwrap();
+        fs::write(dir.join("sub/.v9r/agent.txt"), "agent data").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let trace = TraceLogger::new(dir.join("trace.jsonl")).await.unwrap();
+            vfs::checkpoint(task.id, &trace).await.unwrap();
+        });
+        fs::remove_file(dir.join("secret.txt")).unwrap();
+
+        let bundle: TaskBundle =
+            bincode::deserialize(&export_bundle(&task, None).unwrap()).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let paths: Vec<_> = bundle
+            .files
+            .iter()
+            .map(|f| f.relative_path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("keep.txt"),
+                PathBuf::from("sub/.v9r/agent.txt")
+            ]
+        );
+    }
 
     #[test]
     fn rejects_parent_dir_paths() {
