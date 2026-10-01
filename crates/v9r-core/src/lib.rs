@@ -4,6 +4,7 @@ pub mod adapter;
 pub mod bundle;
 pub mod content;
 pub mod context;
+pub mod counter;
 pub mod effect;
 pub mod execution;
 pub mod facts;
