@@ -10,6 +10,7 @@ pub mod execution;
 pub mod facts;
 pub mod git;
 pub mod git_guard;
+pub mod graph;
 pub mod guarded;
 pub mod kernel;
 pub mod manifest;
