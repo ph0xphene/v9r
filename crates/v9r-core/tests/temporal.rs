@@ -901,3 +901,71 @@ async fn stale_state_attested_freshly_is_believed_unless_independently_witnessed
         }
     }
 }
+
+// ------------------------------------------------------------ provenance
+
+fn snapshot_of(subject: &v9r_core::runtime::RtSubject<TKey>) -> Option<u64> {
+    match subject {
+        v9r_core::runtime::RtSubject::Domain(TKey {
+            at: v9r_core::temporal::At::Snapshot(id),
+            ..
+        }) => Some(*id),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn snapshot_evidence_carries_its_snapshot_in_lineage() {
+    use v9r_core::provenance::{explain, Source};
+    let env = Env::new("lineage");
+    let registry = env.registry();
+    let e = env.clone();
+    let mut rt = guard(&registry, move |op| {
+        e.release(op);
+        Ok(String::new())
+    });
+    let (_, report) = run(&mut rt, env.op()).await;
+    let report = report.unwrap();
+    assert!(report.accepted);
+    let receipt = report.receipt.as_ref().unwrap();
+    let (s0, s1) = (receipt.before.id(), receipt.after.as_ref().unwrap().id());
+
+    let explanation = explain(&report.decision, &registry, snapshot_of);
+    assert!(explanation.problems.is_empty(), "{explanation}");
+    let snapshots: Vec<Option<u64>> = explanation
+        .findings
+        .iter()
+        .filter_map(|f| match &f.source {
+            Source::Lineage(chain) if f.statement.contains("@s") => Some(chain[0].1.snapshot),
+            _ => None,
+        })
+        .collect();
+    assert!(snapshots.contains(&Some(s0)) && snapshots.contains(&Some(s1)));
+    assert!(snapshots.iter().all(|s| *s == Some(s0) || *s == Some(s1)));
+
+    // Evidence moved between moments: relabel one finding's subject from
+    // s0 to s1 (as a faulty layer might). The audit names it.
+    let mut moved = report.decision.clone();
+    let finding = moved
+        .findings
+        .iter_mut()
+        .find(|f| {
+            matches!(&f.obligation.requirement, Requirement::Fact { subject, .. }
+                if snapshot_of(subject) == Some(s0))
+        })
+        .unwrap();
+    if let Requirement::Fact { subject, .. } = &mut finding.obligation.requirement {
+        *subject = v9r_core::runtime::RtSubject::Domain(TKey {
+            at: v9r_core::temporal::At::Snapshot(s1),
+            key: refs_key(),
+        });
+    }
+    let audit = explain(&moved, &registry, snapshot_of);
+    assert!(
+        audit
+            .problems
+            .iter()
+            .any(|p| p.contains(&format!("evidence for snapshot {s1}"))),
+        "{audit}"
+    );
+}
