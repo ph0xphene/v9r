@@ -22,10 +22,12 @@ use v9r_core::fs_provider::FilesystemEvidenceProvider;
 use v9r_core::git::GitRepo;
 use v9r_core::git_provider::GitEvidenceProvider;
 use v9r_core::graph::{
-    self, Answer, Attestor, EvidenceProvider, GraphDomain, GraphRuntime, Key, Registry,
+    self, Answer, Attested, Attestor, EvidenceProvider, GraphDomain, GraphRuntime, Key, Registry,
     Term, Trust,
 };
-use v9r_core::kernel::{Decision, Invariant, Obligation, Phase, Requirement, Status, Strength, Verdict};
+use v9r_core::kernel::{
+    Decision, Invariant, Obligation, Phase, Requirement, Status, Strength, Verdict,
+};
 use v9r_core::runtime::{Authorize, Report};
 
 // ------------------------------------------------------------ invariants
@@ -338,7 +340,10 @@ async fn run(rt: &mut GraphRuntime<Release>, release: Release) -> (Verdict, Opti
     }
 }
 
-fn statuses<'a>(decision: &'a Decision<impl Sized, impl Sized>, invariant: &str) -> Vec<&'a Status> {
+fn statuses<'a>(
+    decision: &'a Decision<impl Sized, impl Sized>,
+    invariant: &str,
+) -> Vec<&'a Status> {
     decision
         .findings
         .iter()
@@ -397,7 +402,11 @@ async fn removing_any_provider_blocks_with_missing_evidence_never_denies() {
     let env = Env::new("remove");
     let release = env.release();
     for (missing, kinds, invariants) in [
-        ("git", vec!["ref", "descends", "tree_content"], vec![COMMIT_VERIFIED, ARTIFACT_MATCHES]),
+        (
+            "git",
+            vec!["ref", "descends", "tree_content"],
+            vec![COMMIT_VERIFIED, ARTIFACT_MATCHES],
+        ),
         ("fs", vec!["dir_content"], vec![ARTIFACT_MATCHES]),
         ("ci", vec!["tests"], vec![TESTS_PASSED]),
     ] {
@@ -405,10 +414,17 @@ async fn removing_any_provider_blocks_with_missing_evidence_never_denies() {
         let mut rt = env.runtime(&registry);
         let result = rt.authorize(release.clone()).await.unwrap();
         let decision = result.decision();
-        assert_eq!(result.verdict(), Verdict::Blocked, "without {missing}:\n{decision}");
+        assert_eq!(
+            result.verdict(),
+            Verdict::Blocked,
+            "without {missing}:\n{decision}"
+        );
         assert!(none_violated(decision), "without {missing}:\n{decision}");
         for invariant in &invariants {
-            assert!(any_undetermined(decision, invariant), "{missing}/{invariant}");
+            assert!(
+                any_undetermined(decision, invariant),
+                "{missing}/{invariant}"
+            );
         }
         // The plan names exactly what nobody can answer.
         let keys: Vec<Key> = decision
@@ -423,11 +439,7 @@ async fn removing_any_provider_blocks_with_missing_evidence_never_denies() {
             })
             .collect();
         let plan = registry.plan(&keys);
-        let mut unresolved: Vec<&str> = plan
-            .unresolved()
-            .iter()
-            .map(|k| k.kind.as_str())
-            .collect();
+        let mut unresolved: Vec<&str> = plan.unresolved().iter().map(|k| k.kind.as_str()).collect();
         unresolved.dedup();
         assert_eq!(unresolved.len(), kinds.len(), "{missing}: {unresolved:?}");
         for kind in kinds {
@@ -444,7 +456,11 @@ async fn verified_negative_evidence_denies() {
     // CI ran on this commit and failed.
     let registry = env.registry(&["ci"]);
     registry.register(env.ci(false), Trust::Attesting);
-    let result = env.runtime(&registry).authorize(release.clone()).await.unwrap();
+    let result = env
+        .runtime(&registry)
+        .authorize(release.clone())
+        .await
+        .unwrap();
     assert_eq!(result.verdict(), Verdict::Deny);
     assert!(any_violated(result.decision(), TESTS_PASSED));
 
@@ -485,8 +501,16 @@ fn providers_know_nothing_of_each_other_the_lifecycle_or_invariants() {
             .filter(|l| l.trim_start().starts_with("use crate::"))
             .collect();
         for forbidden in [
-            "runtime", "kernel", "policy", "guarded", "git_guard", "facts", "fs_provider",
-            "git_provider", "GraphDomain", "Registry",
+            "runtime",
+            "kernel",
+            "policy",
+            "guarded",
+            "git_guard",
+            "facts",
+            "fs_provider",
+            "git_provider",
+            "GraphDomain",
+            "Registry",
         ] {
             assert!(
                 !imports.iter().any(|l| l.contains(forbidden)),
@@ -494,4 +518,394 @@ fn providers_know_nothing_of_each_other_the_lifecycle_or_invariants() {
             );
         }
     }
+}
+
+// ------------------------------------------------------------ phase 5
+
+/// The real git provider's answers, passed off as mere claims.
+struct ClaimingGit(GitEvidenceProvider);
+
+impl EvidenceProvider for ClaimingGit {
+    fn id(&self) -> &str {
+        "git"
+    }
+
+    fn answers(&self, key: &Key) -> bool {
+        self.0.answers(key)
+    }
+
+    fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
+        self.0
+            .provide(keys, attestor)
+            .into_iter()
+            .filter_map(|answer| match answer {
+                Answer::Verified(attested) => Some(Answer::Proposed {
+                    key: attested.fact().subject.clone(),
+                    value: attested.fact().value.clone(),
+                    note: "trust me".into(),
+                }),
+                Answer::Proposed { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// Attests that every commit descends from every base.
+struct LyingGit {
+    id: String,
+    inner: GitEvidenceProvider,
+}
+
+impl EvidenceProvider for LyingGit {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn answers(&self, key: &Key) -> bool {
+        self.inner.answers(key)
+    }
+
+    fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
+        keys.iter()
+            .map(|key| {
+                if key.kind == "descends" {
+                    Answer::Verified(attestor.attest((*key).clone(), Term::Bool(true), "made up"))
+                } else {
+                    // Delegate honestly for everything else.
+                    let mut honest = self.inner.provide(&[key], attestor);
+                    honest.pop().unwrap()
+                }
+            })
+            .collect()
+    }
+}
+
+/// Asked about refs, also volunteers a CI verdict nobody asked it for.
+struct ScopeCreep(GitEvidenceProvider, String);
+
+impl EvidenceProvider for ScopeCreep {
+    fn id(&self) -> &str {
+        "git"
+    }
+
+    fn answers(&self, key: &Key) -> bool {
+        self.0.answers(key)
+    }
+
+    fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
+        let mut answers = self.0.provide(keys, attestor);
+        answers.push(Answer::Verified(attestor.attest(
+            Key::new("tests", [REPO, self.1.as_str()]),
+            outcome(true),
+            "volunteered",
+        )));
+        answers
+    }
+}
+
+/// Asked about one commit, reports a pass for another.
+struct MisattributingCi {
+    passed_commit: String,
+}
+
+impl EvidenceProvider for MisattributingCi {
+    fn id(&self) -> &str {
+        "ci"
+    }
+
+    fn answers(&self, key: &Key) -> bool {
+        is_tests_key(key)
+    }
+
+    fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
+        keys.iter()
+            .map(|key| {
+                Answer::Verified(attestor.attest(
+                    Key::new("tests", [key.args[0].as_str(), &self.passed_commit]),
+                    outcome(true),
+                    "build record",
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Keeps a spare attestation from its first answer and replays it later.
+struct ReplayingCi {
+    commit: String,
+    spare: Mutex<Option<Attested>>,
+}
+
+impl EvidenceProvider for ReplayingCi {
+    fn id(&self) -> &str {
+        "ci"
+    }
+
+    fn answers(&self, key: &Key) -> bool {
+        is_tests_key(key)
+    }
+
+    fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
+        let mut spare = self.spare.lock().unwrap();
+        if let Some(old) = spare.take() {
+            return vec![Answer::Verified(old)];
+        }
+        let key = Key::new("tests", [REPO, self.commit.as_str()]);
+        *spare = Some(attestor.attest(key.clone(), outcome(true), "build record"));
+        let _ = keys;
+        vec![Answer::Verified(attestor.attest(
+            key,
+            outcome(true),
+            "build record",
+        ))]
+    }
+}
+
+async fn authorized(
+    rt: &mut GraphRuntime<Release>,
+    release: Release,
+) -> v9r_core::runtime::Authorization<GraphDomain<Release>> {
+    match rt.authorize(release).await.unwrap() {
+        Authorize::Allowed(auth) => *auth,
+        other => panic!("{:?}", other.decision().to_string()),
+    }
+}
+
+// 1. The git provider lies: it returns claims, not verified evidence.
+#[tokio::test]
+async fn git_claims_instead_of_evidence_block() {
+    let env = Env::new("claims");
+    let release = env.release();
+
+    let registry = env.registry(&["git"]);
+    registry.register(ClaimingGit(env.git_provider()), Trust::Attesting);
+    let result = env
+        .runtime(&registry)
+        .authorize(release.clone())
+        .await
+        .unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked, "{}", result.decision());
+    assert!(none_violated(result.decision()));
+    assert!(result.decision().to_string().contains("proposed"));
+
+    // The same provider registered as claims-only: its attestations are
+    // downgraded.
+    let registry = env.registry(&["git"]);
+    registry.register(env.git_provider(), Trust::ClaimsOnly);
+    let result = env.runtime(&registry).authorize(release).await.unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked, "{}", result.decision());
+    assert!(none_violated(result.decision()));
+}
+
+// 1b. A provider attests outside what it was asked.
+#[tokio::test]
+async fn volunteered_attestations_are_discarded() {
+    let env = Env::new("scope");
+    let registry = env.registry(&["git", "ci"]);
+    registry.register(
+        ScopeCreep(env.git_provider(), env.head.clone()),
+        Trust::Attesting,
+    );
+    let result = env
+        .runtime(&registry)
+        .authorize(env.release())
+        .await
+        .unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked, "{}", result.decision());
+    assert!(any_undetermined(result.decision(), TESTS_PASSED));
+    assert!(registry
+        .discarded()
+        .iter()
+        .any(|d| d.key.kind == "tests" && d.reason.contains("not asked")));
+}
+
+// 1c. An *attesting* provider that lies outright is believed, unless an
+// independent provider contradicts it.
+#[tokio::test]
+async fn a_trusted_liar_is_believed_alone_and_blocked_by_an_independent_witness() {
+    let env = Env::new("liar");
+    let repo = env.work.join(REPO);
+    git(&repo, &["checkout", "-q", "--orphan", "rogue"]);
+    git(&repo, &["commit", "-q", "-m", "rogue"]);
+    let rogue = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", "-f", "release", &rogue]);
+    // `--orphan` keeps the index: the rogue commit has dist's files.
+    let liar = |id: &str| LyingGit {
+        id: id.into(),
+        inner: env.git_provider(),
+    };
+    let probe = Registry::new();
+    probe.register(env.git_provider(), Trust::Attesting);
+    let Some(Term::Digest(digest)) = probe.query(&Key::new("tree_content", [REPO, rogue.as_str()]))
+    else {
+        panic!("no manifest for the rogue commit");
+    };
+    let release = Release {
+        repo: REPO.into(),
+        commit: rogue.clone(),
+        artifact: "dist".into(),
+        digest,
+    };
+    let ci = || FakeCi::new("ci").with(REPO, &rogue, true);
+
+    let registry = Registry::new();
+    registry.register(liar("git"), Trust::Attesting);
+    registry.register(env.fs_provider(), Trust::Attesting);
+    registry.register(ci(), Trust::Attesting);
+    let result = env
+        .runtime(&registry)
+        .authorize(release.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        result.verdict(),
+        Verdict::Allow,
+        "registration is the trust decision: {}",
+        result.decision()
+    );
+
+    registry.register(
+        GitEvidenceProvider::new(
+            "git-2",
+            &env.work,
+            vec![GitRepo {
+                path: REPO.into(),
+                bare: false,
+            }],
+        ),
+        Trust::Attesting,
+    );
+    let result = env.runtime(&registry).authorize(release).await.unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked, "{}", result.decision());
+    assert!(result.decision().to_string().contains("contradictory"));
+}
+
+// 2. The filesystem changes after authorization.
+#[tokio::test]
+async fn artifact_changed_after_authorization_is_refused() {
+    let env = Env::new("fs-stale");
+    let registry = env.registry(&[]);
+    let mut rt = env.runtime(&registry);
+    let auth = authorized(&mut rt, env.release()).await;
+    fs::write(env.work.join("dist/feature.txt"), "swapped\n").unwrap();
+    let report = rt.execute(auth).await.unwrap();
+    assert!(!report.executed && report.output.is_none());
+    assert_eq!(report.decision.verdict, Verdict::Deny);
+    assert!(any_violated(&report.decision, ARTIFACT_MATCHES));
+}
+
+// 3. CI claims success for another commit.
+#[tokio::test]
+async fn ci_success_for_another_commit_does_not_count() {
+    let env = Env::new("ci-other");
+    let release = env.release();
+
+    let registry = env.registry(&["ci"]);
+    registry.register(
+        MisattributingCi {
+            passed_commit: env.approved_base.clone(),
+        },
+        Trust::Attesting,
+    );
+    let result = env
+        .runtime(&registry)
+        .authorize(release.clone())
+        .await
+        .unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked, "{}", result.decision());
+    assert!(any_undetermined(result.decision(), TESTS_PASSED));
+    assert!(registry
+        .discarded()
+        .iter()
+        .any(|d| d.key.args[1] == env.approved_base));
+
+    // An honest CI that only has a result for the base commit.
+    let registry = env.registry(&["ci"]);
+    registry.register(
+        FakeCi::new("ci").with(REPO, &env.approved_base, true),
+        Trust::Attesting,
+    );
+    let result = env.runtime(&registry).authorize(release).await.unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked);
+}
+
+// 4. Two providers disagree.
+#[tokio::test]
+async fn disagreeing_providers_block() {
+    let env = Env::new("disagree");
+    let registry = env.registry(&["ci"]);
+    registry.register(
+        FakeCi::new("ci-a").with(REPO, &env.head, true),
+        Trust::Attesting,
+    );
+    registry.register(
+        FakeCi::new("ci-b").with(REPO, &env.head, false),
+        Trust::Attesting,
+    );
+    let result = env
+        .runtime(&registry)
+        .authorize(env.release())
+        .await
+        .unwrap();
+    assert_eq!(result.verdict(), Verdict::Blocked, "{}", result.decision());
+    assert!(none_violated(result.decision()));
+    assert!(result.decision().to_string().contains("contradictory"));
+}
+
+// 5. Evidence becomes stale: the world moves, or an old attestation is
+// replayed.
+#[tokio::test]
+async fn stale_evidence_is_refused() {
+    let env = Env::new("stale");
+    let registry = env.registry(&[]);
+    let mut rt = env.runtime(&registry);
+    let auth = authorized(&mut rt, env.release()).await;
+    git(
+        &env.work.join(REPO),
+        &["commit", "-q", "--allow-empty", "-m", "later"],
+    );
+    let report = rt.execute(auth).await.unwrap();
+    assert!(!report.executed);
+    assert_eq!(report.decision.verdict, Verdict::Deny);
+    assert!(any_violated(&report.decision, COMMIT_VERIFIED));
+
+    let env = Env::new("replay");
+    let registry = env.registry(&["ci"]);
+    registry.register(
+        ReplayingCi {
+            commit: env.head.clone(),
+            spare: Mutex::default(),
+        },
+        Trust::Attesting,
+    );
+    let mut rt = env.runtime(&registry);
+    let auth = authorized(&mut rt, env.release()).await;
+    let report = rt.execute(auth).await.unwrap();
+    assert!(!report.executed);
+    assert_eq!(
+        report.decision.verdict,
+        Verdict::Blocked,
+        "{}",
+        report.decision
+    );
+    assert!(registry
+        .discarded()
+        .iter()
+        .any(|d| d.reason.contains("another provider or request")));
+}
+
+// 6. A provider disappears between authorization and execution.
+#[tokio::test]
+async fn provider_disappearing_before_execution_blocks() {
+    let env = Env::new("vanish");
+    let registry = env.registry(&[]);
+    let mut rt = env.runtime(&registry);
+    let auth = authorized(&mut rt, env.release()).await;
+    assert!(registry.remove("ci"));
+    let report = rt.execute(auth).await.unwrap();
+    assert!(!report.executed && report.output.is_none());
+    assert_eq!(report.decision.verdict, Verdict::Blocked);
+    assert!(none_violated(&report.decision));
+    // Refusing a stale declaration changes nothing, so nothing is held.
+    assert!(rt.is_accepting());
 }

@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::{
-    EvidenceBase, Evidence, Fact, Invariant, Obligation, Phase, Proposed, Provenance, Verified,
+    Evidence, EvidenceBase, Fact, Invariant, Obligation, Phase, Proposed, Provenance, Verified,
 };
 use crate::runtime::{
     Concluded, DomainEvidence, DomainObligation, EffectDomain, MemoryJournal, Runtime,
@@ -155,11 +155,7 @@ impl Attested {
 
 pub enum Answer {
     Verified(Attested),
-    Proposed {
-        key: Key,
-        value: Term,
-        note: String,
-    },
+    Proposed { key: Key, value: Term, note: String },
 }
 
 /// Whether a provider's attestations count as verified evidence.
@@ -524,7 +520,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             .to_lowercase();
-        for word in ["path", "file", "commit", "git", "workspace", "ci", "artifact"] {
+        for word in [
+            "path",
+            "file",
+            "commit",
+            "git",
+            "workspace",
+            "ci",
+            "artifact",
+        ] {
             assert!(
                 !code
                     .split(|c: char| !c.is_alphanumeric() && c != '_')
