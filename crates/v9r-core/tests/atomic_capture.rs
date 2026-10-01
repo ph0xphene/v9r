@@ -679,3 +679,157 @@ fn observer_correspondence_race() {
         flips.load(Ordering::Relaxed)
     );
 }
+
+// ------------------------------------------------------------ OS-assisted quiescence
+
+/// A writer *process* cycling through atomic changes (the same states as
+/// `cycle()`), started in its own systemd scope, whose cgroup it reports.
+/// With `escape`, it first moves itself into a cgroup it creates next to
+/// that scope, as any same-user process may.
+fn spawn_writer(root: &Path, escape: bool) -> Option<(std::process::Child, String)> {
+    let escape = if escape {
+        "sib=/sys/fs/cgroup$(dirname $own)/v9r-escape-$$.scope; \
+         mkdir -p $sib && echo $$ > $sib/cgroup.procs || exit 9; "
+    } else {
+        ""
+    };
+    // Script files: systemd-run would expand `$$` on its command line.
+    // The loop is Python, not shell: one fork per operation would be too
+    // slow to race a capture.
+    fs::write(
+        root.join("outside/writer.py"),
+        r#"import os, sys
+os.chdir(sys.argv[1])
+A, B = b"A" * 65536, b"B" * 65536
+def put(path, data):
+    with open("outside/.r", "wb") as f: f.write(data)
+    os.rename("outside/.r", path)
+def link(path, target):
+    os.symlink(target, "outside/.l"); os.rename("outside/.l", path)
+while True:
+    os.rename("dist/z/sub", "dist/a/sub"); put("dist/a/x", b"X1"); os.chmod("dist/a/run.sh", 0o755)
+    link("dist/a/link", "run.sh"); put("dist/m/big", B)
+    os.rename("dist/a/sub", "dist/z/sub"); put("dist/a/x", b"x0"); os.chmod("dist/a/run.sh", 0o644)
+    link("dist/a/link", "x"); put("dist/m/big", A)
+"#,
+    )
+    .ok()?;
+    let script = root.join("outside/writer.sh");
+    fs::write(
+        &script,
+        format!(
+            "own=$(cut -d: -f3 /proc/$$/cgroup); echo $own > {root}/outside/scope; {escape}\
+             exec python3 {root}/outside/writer.py {root}\n",
+            root = root.display()
+        ),
+    )
+    .ok()?;
+    let child = std::process::Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "sh"])
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let scope = fs::read_to_string(root.join("outside/scope")).ok()?;
+    Some((child, format!("/sys/fs/cgroup{}", scope.trim())))
+}
+
+/// Freeze or thaw a cgroup and wait until it is. A cgroup that no longer
+/// exists (systemd removes an emptied scope) has nothing to freeze: the
+/// caller is left believing the writer is frozen, as a runtime would be.
+fn freeze(scope: &str, on: bool) {
+    if fs::write(format!("{scope}/cgroup.freeze"), if on { "1" } else { "0" }).is_err() {
+        return;
+    }
+    let want = if on { "frozen 1" } else { "frozen 0" };
+    for _ in 0..1000 {
+        match fs::read_to_string(format!("{scope}/cgroup.events")) {
+            Ok(events) if !events.contains(want) => {}
+            _ => return,
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    panic!("{scope} did not reach {want}");
+}
+
+/// Kills the writer even if the test panics.
+struct Reap(std::process::Child);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "needs a systemd user session with cgroup delegation; run with --ignored --nocapture"]
+fn freezer_quiescence() {
+    let truth = existed(&[], &cycle());
+    println!("| writer | captures | true | false | blocked |\n|---|---|---|---|---|");
+    for (name, escape, frozen) in [
+        ("not frozen (baseline)", false, false),
+        ("frozen, stays in its scope", false, true),
+        (
+            "frozen scope, writer escaped to a sibling cgroup",
+            true,
+            true,
+        ),
+    ] {
+        let root = scratch("freezer");
+        populate(&root, &[]);
+        let Some((child, scope)) = spawn_writer(&root, escape) else {
+            println!("systemd-run --user --scope unavailable");
+            return;
+        };
+        let mut writer = Reap(child);
+        if let Ok(Some(status)) = writer.0.try_wait() {
+            println!("| {name} | writer exited early ({status}) | | | |");
+            let _ = fs::remove_dir_all(&root);
+            continue;
+        }
+        let (mut t, mut f, mut b, captures) = (0, 0, 0, 200);
+        for _ in 0..captures {
+            if frozen {
+                freeze(&scope, true);
+            }
+            let registry = Registry::new();
+            let store = ObjectStore::new();
+            registry.register(RawFsObserver::new("fs", &root), Trust::Attesting);
+            registry.register(store.clone(), Trust::ClaimsOnly);
+            registry.add_verifier(FsSnapshot::new(store));
+            let result = snapshot(&registry);
+            if frozen {
+                freeze(&scope, false);
+            }
+            match result {
+                Ok(r) if truth.contains(&r) => t += 1,
+                Ok(_) => f += 1,
+                Err(_) => b += 1,
+            }
+        }
+        let escaped_to =
+            fs::read_to_string(format!("/proc/{}/cgroup", writer.0.id())).unwrap_or_default();
+        drop(writer);
+        let _ = fs::remove_dir_all(&root);
+        println!("| {name} | {captures} | {t} | {f} | {b} |");
+        if escape {
+            println!(
+                "writer ran in {}; frozen scope {scope} exists: {}",
+                escaped_to.trim(),
+                Path::new(&scope).exists()
+            );
+            if let Some(dir) = escaped_to.trim().strip_prefix("0::") {
+                for _ in 0..50 {
+                    if fs::remove_dir(format!("/sys/fs/cgroup{dir}")).is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+}
