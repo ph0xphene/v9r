@@ -739,6 +739,27 @@ async fn command_authorization_goes_stale_when_any_ref_moves() {
     ));
 }
 
+#[tokio::test]
+async fn out_of_band_change_between_steps_is_not_absorbed() {
+    // Before the shared runtime, each git authorization re-based on a fresh
+    // scan, so a change made outside v9r *between* steps became the
+    // trusted baseline unnoticed. Now the basis is the last accepted state.
+    let env = Env::new("between-steps");
+    let mut guard = env.start().await;
+    ok(&mut guard, &["touch", "notes.txt"], &[]).await;
+    env.out_of_band(&["tag", "planted"]);
+    let (pre, report) = run(&mut guard, cmd(&["touch", "more.txt"], &[])).await;
+    assert_eq!(pre, Verdict::Allow);
+    let report = report.unwrap();
+    assert!(!report.executed);
+    assert!(any_violated(
+        &report.decision,
+        "authorization_basis_current"
+    ));
+    assert!(!guard.is_accepting());
+    assert!(!env.work.join("more.txt").exists());
+}
+
 // ------------------------------------------------ malicious proposals
 
 #[tokio::test]
