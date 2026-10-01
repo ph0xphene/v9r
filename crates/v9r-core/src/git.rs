@@ -459,90 +459,97 @@ impl GitObserver {
     ) -> GitEvidence {
         let mut evidence = GitEvidence::new();
         for subject in subjects {
-            let repo_name = match subject {
-                GitSubject::Head { repo }
-                | GitSubject::Ref { repo, .. }
-                | GitSubject::Refs { repo }
-                | GitSubject::Descends { repo, .. }
-                | GitSubject::ContentManifest { repo, .. }
-                | GitSubject::Worktree { repo } => repo,
-            };
-            let Some(Ok(state)) = observation.repos.get(repo_name) else {
-                continue;
-            };
-            let (value, basis) = match subject {
-                GitSubject::Head { .. } => (
-                    GitValue::Head {
-                        symref: state.head_symref.clone(),
-                        commit: state.head.clone(),
+            if let Some((value, basis)) = self.answer(observation, workspace, subject) {
+                evidence.add_verified(
+                    Verified::attest(Fact {
+                        subject: subject.clone(),
+                        value,
+                    }),
+                    Provenance {
+                        observer: "git-plumbing".to_string(),
+                        basis,
                     },
-                    format!("refs {}", state.digest()),
-                ),
-                GitSubject::Ref { name, .. } => (
-                    match state.refs.get(name) {
-                        Some(oid) => GitValue::Points { oid: oid.clone() },
-                        None => GitValue::Absent,
-                    },
-                    format!("refs {}", state.digest()),
-                ),
-                GitSubject::Refs { .. } => (
-                    GitValue::Digest {
-                        sha256: state.digest(),
-                    },
-                    format!("refs {}", state.digest()),
-                ),
-                GitSubject::Descends {
-                    ancestor,
-                    descendant,
-                    ..
-                } => match self.descends(&state.git_dir, ancestor, descendant) {
-                    Some(true) => (GitValue::Yes, "merge-base --is-ancestor".to_string()),
-                    Some(false) => (GitValue::No, "merge-base --is-ancestor".to_string()),
-                    None => continue,
-                },
-                GitSubject::ContentManifest { commit, .. } => {
-                    match self.commit_manifest(&state.git_dir, commit) {
-                        Some(sha256) => (
-                            GitValue::Digest { sha256 },
-                            "ls-tree + cat-file".to_string(),
-                        ),
-                        None => continue,
-                    }
-                }
-                GitSubject::Worktree { repo } => {
-                    let (Some(workspace), Some(_), Some(head)) =
-                        (workspace, &state.work_tree, &state.head)
-                    else {
-                        continue;
-                    };
-                    let (Some(tree), Some(committed)) = (
-                        content::from_fs_state(workspace.state(), repo, &[".git"]),
-                        self.commit_manifest(&state.git_dir, head),
-                    ) else {
-                        continue;
-                    };
-                    (
-                        if tree == committed {
-                            GitValue::MatchesHead
-                        } else {
-                            GitValue::DiffersFromHead
-                        },
-                        format!("workspace {} vs HEAD manifest", workspace.digest()),
-                    )
-                }
-            };
-            evidence.add_verified(
-                Verified::attest(Fact {
-                    subject: subject.clone(),
-                    value,
-                }),
-                Provenance {
-                    observer: "git-plumbing".to_string(),
-                    basis,
-                },
-            );
+                );
+            }
         }
         evidence
+    }
+
+    /// The value of one subject and the basis it was established on, or
+    /// `None` if it cannot be established.
+    pub(crate) fn answer(
+        &self,
+        observation: &GitObservation,
+        workspace: Option<&Observation>,
+        subject: &GitSubject,
+    ) -> Option<(GitValue, String)> {
+        let repo_name = match subject {
+            GitSubject::Head { repo }
+            | GitSubject::Ref { repo, .. }
+            | GitSubject::Refs { repo }
+            | GitSubject::Descends { repo, .. }
+            | GitSubject::ContentManifest { repo, .. }
+            | GitSubject::Worktree { repo } => repo,
+        };
+        let Some(Ok(state)) = observation.repos.get(repo_name) else {
+            return None;
+        };
+        Some(match subject {
+            GitSubject::Head { .. } => (
+                GitValue::Head {
+                    symref: state.head_symref.clone(),
+                    commit: state.head.clone(),
+                },
+                format!("refs {}", state.digest()),
+            ),
+            GitSubject::Ref { name, .. } => (
+                match state.refs.get(name) {
+                    Some(oid) => GitValue::Points { oid: oid.clone() },
+                    None => GitValue::Absent,
+                },
+                format!("refs {}", state.digest()),
+            ),
+            GitSubject::Refs { .. } => (
+                GitValue::Digest {
+                    sha256: state.digest(),
+                },
+                format!("refs {}", state.digest()),
+            ),
+            GitSubject::Descends {
+                ancestor,
+                descendant,
+                ..
+            } => {
+                let value = match self.descends(&state.git_dir, ancestor, descendant)? {
+                    true => GitValue::Yes,
+                    false => GitValue::No,
+                };
+                (value, "merge-base --is-ancestor".to_string())
+            }
+            GitSubject::ContentManifest { commit, .. } => (
+                GitValue::Digest {
+                    sha256: self.commit_manifest(&state.git_dir, commit)?,
+                },
+                "ls-tree + cat-file".to_string(),
+            ),
+            GitSubject::Worktree { repo } => {
+                let (Some(workspace), Some(_), Some(head)) =
+                    (workspace, &state.work_tree, &state.head)
+                else {
+                    return None;
+                };
+                let tree = content::from_fs_state(workspace.state(), repo, &[".git"])?;
+                let committed = self.commit_manifest(&state.git_dir, head)?;
+                (
+                    if tree == committed {
+                        GitValue::MatchesHead
+                    } else {
+                        GitValue::DiffersFromHead
+                    },
+                    format!("workspace {} vs HEAD manifest", workspace.digest()),
+                )
+            }
+        })
     }
 }
 
