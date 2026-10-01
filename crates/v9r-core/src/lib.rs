@@ -10,6 +10,7 @@ pub mod execution;
 pub mod facts;
 pub mod fs_provider;
 pub mod fs_raw;
+pub mod fs_watch;
 pub mod git;
 pub mod git_guard;
 pub mod git_provider;

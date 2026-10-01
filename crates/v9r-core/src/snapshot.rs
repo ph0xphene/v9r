@@ -25,6 +25,7 @@
 //! keep it), so a listing cannot silently drop a subdirectory there.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -113,26 +114,113 @@ impl EvidenceProvider for ObjectStore {
 
 // ------------------------------------------------------------ snapshot creation
 
+/// git's mode for an `lstat` result (`fs_meta`).
+fn git_mode(meta: &BTreeMap<String, String>) -> String {
+    let mode = meta
+        .get("mode")
+        .and_then(|m| u32::from_str_radix(m, 8).ok())
+        .unwrap_or(0);
+    match mode & 0o170000 {
+        0o040000 => "40000",
+        0o120000 => "120000",
+        0o100000 if mode & 0o100 != 0 => "100755",
+        0o100000 => "100644",
+        _ => "other",
+    }
+    .to_string()
+}
+
+/// How a snapshot is captured. The strategies combine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capture {
+    /// A: walk a second time afterwards; require the same root id.
+    pub double_walk: bool,
+    /// B: `lstat` every directory and entry before reading it and again
+    /// after the walk; require identical metadata (inode, mode, size, link
+    /// count, mtime, ctime).
+    pub recheck: bool,
+    /// Change journal: watch each directory (inotify) before listing it;
+    /// require that no change event occurred until the end of capture.
+    pub watch: bool,
+}
+
 /// Derives `snapshot(dir)` = root tree id from primitive observations,
 /// storing the objects. The one step that rests on an observer.
 pub struct FsSnapshot {
     store: ObjectStore,
+    capture: Capture,
+}
+
+static SESSIONS: AtomicU64 = AtomicU64::new(1);
+
+/// One walk's parameters.
+struct Walker<'a> {
+    /// Reading tag, so that a second walk is a second set of observations.
+    tag: Option<&'a str>,
+    meta: bool,
+    session: Option<&'a str>,
+}
+
+impl Walker<'_> {
+    fn key(&self, kind: &str, path: &str) -> Key {
+        match self.tag {
+            Some(tag) => Key::new(kind, [path, tag]),
+            None => Key::new(kind, [path]),
+        }
+    }
+}
+
+/// A finished walk: root tree (`None` if no files), what it rests on, and
+/// every path whose metadata was taken.
+struct Built {
+    root: Option<String>,
+    basis: Vec<Basis>,
+    paths: Vec<String>,
+}
+
+/// Take `key` in order: `Need` it alone if absent.
+macro_rules! first {
+    ($inputs:expr, $key:expr, $basis:ident) => {
+        match observed($inputs, &$key) {
+            Walk::Done((value, via)) => {
+                $basis.push(via);
+                value
+            }
+            Walk::Need(k) => return Walk::Need(k),
+            Walk::Fail(r) => return Walk::Fail(r),
+        }
+    };
 }
 
 impl FsSnapshot {
     pub fn new(store: ObjectStore) -> Self {
-        Self { store }
+        Self::with(store, Capture::default())
     }
 
-    /// The tree id of `dir` (`None` if it holds no files: git stores no
-    /// empty trees), and the observations it rests on.
-    fn build(&self, inputs: &Inputs, dir: &str) -> Walk<(Option<String>, Vec<Basis>)> {
-        let listing_key = Key::new("fs_dir", [dir]);
-        let stat_key = Key::new("fs_stat", [dir]);
-        let (listing, stat, mut basis) =
+    pub fn with(store: ObjectStore, capture: Capture) -> Self {
+        Self { store, capture }
+    }
+
+    fn build(&self, inputs: &Inputs, dir: &str, w: &Walker) -> Walk<Built> {
+        let mut basis = Vec::new();
+        let mut paths = Vec::new();
+        // Watch before anything is read, then metadata, then the listing.
+        if let Some(session) = w.session {
+            if first!(inputs, Key::new("fs_watch", [dir, session]), basis) != Term::Bool(true) {
+                return Walk::Fail(format!("{dir}: not watched"));
+            }
+        }
+        if w.meta {
+            first!(inputs, w.key("fs_meta", dir), basis);
+            paths.push(dir.to_string());
+        }
+        let listing_key = w.key("fs_dir", dir);
+        let stat_key = w.key("fs_stat", dir);
+        let (mut listing, stat) =
             match (observed(inputs, &listing_key), observed(inputs, &stat_key)) {
                 (Walk::Done((Term::Map(l), b1)), Walk::Done((Term::Map(s), b2))) => {
-                    (l, s, vec![b1, b2])
+                    basis.extend([b1, b2]);
+                    (l, s)
                 }
                 (Walk::Fail(r), _) | (_, Walk::Fail(r)) => return Walk::Fail(r),
                 (Walk::Done(_), Walk::Done(_)) => return Walk::Fail(format!("{dir}: malformed")),
@@ -151,19 +239,58 @@ impl FsSnapshot {
             None => return Walk::Fail(format!("{dir}: no link count")),
             _ => {}
         }
+        // Every entry's metadata before any entry's content.
+        if w.meta {
+            let metas: Vec<Key> = listing
+                .iter()
+                .filter(|(_, mode)| *mode != "40000")
+                .map(|(name, _)| w.key("fs_meta", &format!("{dir}/{name}")))
+                .collect();
+            let missing: Vec<Key> = metas
+                .iter()
+                .filter(|k| !inputs.contains_key(*k))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Walk::Need(missing);
+            }
+            for key in &metas {
+                let Term::Map(meta) = first!(inputs, key.clone(), basis) else {
+                    return Walk::Fail(format!("{}: malformed metadata", key.args[0]));
+                };
+                paths.push(key.args[0].clone());
+                // Only values from inside the bracket may be used: the mode
+                // comes from this lstat, not from the earlier listing.
+                let name = key.args[0]
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let bracketed = git_mode(&meta);
+                let listed = &listing[&name];
+                let kind = |m: &str| if m == "120000" { "link" } else { "file" };
+                if kind(&bracketed) != kind(listed) || bracketed == "other" {
+                    return Walk::Fail(format!(
+                        "{}: changed from {listed} to {bracketed} between listing and lstat",
+                        key.args[0]
+                    ));
+                }
+                listing.insert(name, bracketed);
+            }
+        }
         let mut entries = Vec::new();
         let mut need = Vec::new();
         for (name, mode) in &listing {
             let path = format!("{dir}/{name}");
             let id = match mode.as_str() {
-                "40000" => match self.build(inputs, &path) {
-                    Walk::Done((Some(id), more)) => {
-                        basis.extend(more);
-                        id
-                    }
-                    Walk::Done((None, more)) => {
-                        basis.extend(more);
-                        continue;
+                "40000" => match self.build(inputs, &path, w) {
+                    Walk::Done(sub) => {
+                        basis.extend(sub.basis);
+                        paths.extend(sub.paths);
+                        match sub.root {
+                            Some(id) => id,
+                            None => continue,
+                        }
                     }
                     Walk::Need(k) => {
                         need.extend(k);
@@ -173,9 +300,9 @@ impl FsSnapshot {
                 },
                 "100644" | "100755" | "120000" => {
                     let input = if mode == "120000" {
-                        Key::new("fs_link", [path.as_str()])
+                        w.key("fs_link", &path)
                     } else {
-                        Key::new("fs_file", [path.as_str()])
+                        w.key("fs_file", &path)
                     };
                     match observed(inputs, &input) {
                         Walk::Done((Term::Bytes(b), via)) if mode != "120000" => {
@@ -202,7 +329,11 @@ impl FsSnapshot {
             return Walk::Need(need);
         }
         if entries.is_empty() {
-            return Walk::Done((None, basis));
+            return Walk::Done(Built {
+                root: None,
+                basis,
+                paths,
+            });
         }
         // git's order: names compared as if trees ended in '/'.
         entries.sort_by_key(|(mode, name, _)| {
@@ -217,7 +348,106 @@ impl FsSnapshot {
             body.extend(format!("{mode} {name}\0").into_bytes());
             body.extend(unhex(id).expect("our own hex"));
         }
-        Walk::Done((Some(self.store.put("tree", &body)), basis))
+        Walk::Done(Built {
+            root: Some(self.store.put("tree", &body)),
+            basis,
+            paths,
+        })
+    }
+
+    fn root(&self, built: &Built) -> String {
+        built
+            .root
+            .clone()
+            .unwrap_or_else(|| self.store.put("tree", b""))
+    }
+
+    fn capture(&self, inputs: &Inputs, dir: &str) -> Result<(String, Vec<Basis>), Step> {
+        let c = self.capture;
+        let plain = !(c.double_walk || c.recheck || c.watch);
+        // One session per capture: reuse the one already in the inputs.
+        let session = c.watch.then(|| {
+            inputs
+                .keys()
+                .find(|k| k.kind == "fs_watch")
+                .map(|k| k.args[1].clone())
+                .unwrap_or_else(|| format!("s{}", SESSIONS.fetch_add(1, Ordering::Relaxed)))
+        });
+        let walker = Walker {
+            tag: (!plain).then_some("w1"),
+            meta: c.recheck,
+            session: session.as_deref(),
+        };
+        let lift = |w: Walk<Built>| match w {
+            Walk::Done(b) => Ok(b),
+            Walk::Need(k) => Err(Step::Need(k)),
+            Walk::Fail(r) => Err(Step::Incomplete(r)),
+        };
+        let built = lift(self.build(inputs, dir, &walker))?;
+        let root = self.root(&built);
+        let mut basis = built.basis;
+
+        if c.recheck {
+            let again: Vec<Key> = built
+                .paths
+                .iter()
+                .map(|p| Key::new("fs_meta", [p.as_str(), "recheck"]))
+                .collect();
+            let missing: Vec<Key> = again
+                .iter()
+                .filter(|k| !inputs.contains_key(*k))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Err(Step::Need(missing));
+            }
+            for (path, key) in built.paths.iter().zip(&again) {
+                let before = observed(inputs, &Key::new("fs_meta", [path.as_str(), "w1"]));
+                match (before, observed(inputs, key)) {
+                    (Walk::Done((a, _)), Walk::Done((b, via))) => {
+                        if a != b {
+                            return Err(Step::Incomplete(format!(
+                                "{path} changed during capture: {a:?} -> {b:?}"
+                            )));
+                        }
+                        basis.push(via);
+                    }
+                    _ => return Err(Step::Incomplete(format!("{path} vanished during capture"))),
+                }
+            }
+        }
+        if c.double_walk {
+            let second = Walker {
+                tag: Some("w2"),
+                meta: false,
+                session: None,
+            };
+            let again = lift(self.build(inputs, dir, &second))?;
+            let other = self.root(&again);
+            if other != root {
+                return Err(Step::Incomplete(format!(
+                    "second walk found {other}, first found {root}"
+                )));
+            }
+            basis.extend(again.basis);
+        }
+        if let Some(session) = &session {
+            let key = Key::new("fs_changes", [session.as_str()]);
+            match observed(inputs, &key) {
+                Walk::Done((Term::Map(m), via)) => {
+                    let events = m.get("events").map_or("?", String::as_str);
+                    if events != "0" || m.get("overflow").map(String::as_str) != Some("false") {
+                        return Err(Step::Incomplete(format!(
+                            "{events} change event(s) during capture"
+                        )));
+                    }
+                    basis.push(via);
+                }
+                Walk::Need(k) => return Err(Step::Need(k)),
+                _ => return Err(Step::Incomplete("change journal unavailable".into())),
+            }
+        }
+        Ok((root, basis))
     }
 }
 
@@ -231,13 +461,12 @@ impl Verifier for FsSnapshot {
     }
 
     fn step(&self, key: &Key, inputs: &Inputs) -> Step {
-        match self.build(inputs, &key.args[0]) {
-            Walk::Done((root, basis)) => Step::Derived {
-                value: Term::Id(root.unwrap_or_else(|| self.store.put("tree", b""))),
+        match self.capture(inputs, &key.args[0]) {
+            Ok((root, basis)) => Step::Derived {
+                value: Term::Id(root),
                 basis,
             },
-            Walk::Need(k) => Step::Need(k),
-            Walk::Fail(r) => Step::Incomplete(r),
+            Err(step) => step,
         }
     }
 }
