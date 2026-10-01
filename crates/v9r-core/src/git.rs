@@ -184,6 +184,23 @@ impl GitObservation {
         Some(state.refs.get(name))
     }
 
+    /// Every ref of one repo (and `HEAD`), name → target, if observed.
+    pub fn refs_map(&self, repo: &str) -> Option<BTreeMap<String, String>> {
+        let state = self.repos.get(repo)?.as_ref().ok()?;
+        let mut map: BTreeMap<String, String> = state
+            .refs
+            .iter()
+            .map(|(name, oid)| (name.clone(), oid.as_str().to_string()))
+            .collect();
+        let head = match (&state.head_symref, &state.head) {
+            (Some(symref), _) => format!("ref: {symref}"),
+            (None, Some(oid)) => oid.as_str().to_string(),
+            (None, None) => "unborn".to_string(),
+        };
+        map.insert("HEAD".to_string(), head);
+        Some(map)
+    }
+
     pub fn unobservable(&self) -> Vec<(&str, &str)> {
         self.repos
             .iter()

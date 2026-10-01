@@ -40,6 +40,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -87,6 +88,9 @@ pub enum Term {
     /// A digest in a normal form both sides of a comparison agree on.
     Digest(String),
     Text(String),
+    /// A set-valued fact (e.g. every ref of a repository, every entry of
+    /// a tree), name → value.
+    Map(BTreeMap<String, String>),
     Absent,
 }
 
@@ -95,6 +99,12 @@ impl fmt::Debug for Term {
         match self {
             Term::Bool(b) => write!(f, "{b}"),
             Term::Id(s) | Term::Digest(s) | Term::Text(s) => write!(f, "{s}"),
+            Term::Map(map) => {
+                // Display only: a short fingerprint, not a commitment.
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                map.hash(&mut hasher);
+                write!(f, "{{{} entries, #{:016x}}}", map.len(), hasher.finish())
+            }
             Term::Absent => f.write_str("absent"),
         }
     }

@@ -6,6 +6,7 @@
 //! | `ref` | `repo`, `refname` | `Id(oid)` or `Absent` |
 //! | `descends` | `repo`, `ancestor oid`, `descendant oid` | `Bool` |
 //! | `tree_content` | `repo`, `commit oid` | `Digest`: the `crate::content` manifest of the commit's tree |
+//! | `refs` | `repo` | `Map`: every ref name (and `HEAD`) → target |
 //!
 //! Object ids are validated before anything reaches `git`; a key with a
 //! malformed id is not answered.
@@ -50,6 +51,16 @@ impl GitEvidenceProvider {
         };
         known(args[0]).then_some(subject)
     }
+
+    /// The repo of a `refs(repo)` key.
+    fn refs_repo<'k>(&self, key: &'k Key) -> Option<&'k str> {
+        match (key.kind.as_str(), key.args.as_slice()) {
+            ("refs", [repo]) if self.observer.repos().iter().any(|r| &r.path == repo) => {
+                Some(repo)
+            }
+            _ => None,
+        }
+    }
 }
 
 fn term(value: GitValue) -> Option<Term> {
@@ -69,13 +80,21 @@ impl EvidenceProvider for GitEvidenceProvider {
     }
 
     fn answers(&self, key: &Key) -> bool {
-        self.subject(key).is_some()
+        self.subject(key).is_some() || self.refs_repo(key).is_some()
     }
 
     fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
         let observation = self.observer.observe();
         keys.iter()
             .filter_map(|key| {
+                if let Some(repo) = self.refs_repo(key) {
+                    let refs = observation.refs_map(repo)?;
+                    return Some(Answer::Verified(attestor.attest(
+                        (*key).clone(),
+                        Term::Map(refs),
+                        "for-each-ref",
+                    )));
+                }
                 let subject = self.subject(key)?;
                 let (value, basis) = self.observer.answer(&observation, None, &subject)?;
                 Some(Answer::Verified(attestor.attest(
