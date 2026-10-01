@@ -53,8 +53,7 @@ use crate::kernel::{Fact, Name, Semantic};
 use crate::manifest::{normalize_path, Manifest};
 use crate::policy::{ActionProposal, Context, Policy, ProposedAction, Stage as PolicyStage};
 use crate::runtime::{
-    self, Compensable, Concluded, DomainObligation, EffectDomain, Runtime,
-    RuntimeFault, Stage,
+    self, Compensable, Concluded, DomainObligation, EffectDomain, Runtime, RuntimeFault, Stage,
 };
 use crate::state::ContentHash;
 use crate::task::Task;
@@ -154,7 +153,11 @@ impl Workspace {
         Ok(execution::observe_blocking(normalize_path(&self.task.workdir)).await?)
     }
 
-    pub(crate) async fn run(&mut self, spec: CommandSpec, requested: Option<String>) -> WorkspaceEffect {
+    pub(crate) async fn run(
+        &mut self,
+        spec: CommandSpec,
+        requested: Option<String>,
+    ) -> WorkspaceEffect {
         let label = command_label(&spec);
         let (action, outcome, result) =
             execution::run_command(&mut self.task, spec, &self.trace).await;
@@ -191,9 +194,15 @@ impl Workspace {
                 outcome,
                 result,
             } => {
-                let receipt =
-                    execution::record_effect(action, requested, outcome, before, after, &self.trace)
-                        .await?;
+                let receipt = execution::record_effect(
+                    action,
+                    requested,
+                    outcome,
+                    before,
+                    after,
+                    &self.trace,
+                )
+                .await?;
                 if is_test_command(&self.task.manifest.test_commands, &label) {
                     if let Some((fact, provenance)) =
                         facts::test_outcome(before.digest(), receipt.outcome(), &label)

@@ -306,12 +306,12 @@ impl Invariant<GitContext<'_>, CrossSubject, CrossValue> for GitInvariant {
                 [
                     one(pin(&commit)),
                     one(hard(
-                            CrossSubject::Git(GitSubject::Descends {
-                                repo: release.repo.clone(),
-                                ancestor: release.approved_base.clone(),
-                                descendant: commit,
-                            }),
-                            CrossValue::Git(GitValue::Yes),
+                        CrossSubject::Git(GitSubject::Descends {
+                            repo: release.repo.clone(),
+                            ancestor: release.approved_base.clone(),
+                            descendant: commit,
+                        }),
+                        CrossValue::Git(GitValue::Yes),
                     )),
                 ]
                 .concat()
@@ -369,7 +369,12 @@ impl Invariant<GitContext<'_>, CrossSubject, CrossValue> for GitInvariant {
                     scopes: ctx.policy.writable_refs.clone(),
                 },
             ),
-            (G::RollbackRestoresRefs, S::PostRollback { checkpoint_refs, .. }) => ctx
+            (
+                G::RollbackRestoresRefs,
+                S::PostRollback {
+                    checkpoint_refs, ..
+                },
+            ) => ctx
                 .policy
                 .repos
                 .iter()
@@ -428,7 +433,10 @@ pub struct GitWorld {
 pub enum GitEffect {
     Workspace(WorkspaceEffect),
     /// A release runs nothing; it is a judged declaration.
-    Release { commit: String, manifest: ContentHash },
+    Release {
+        commit: String,
+        manifest: ContentHash,
+    },
 }
 
 /// Git as a domain: the workspace effect machinery plus a git observer
@@ -550,13 +558,20 @@ impl EffectDomain for GitDomain {
                 &self
                     .observer
                     .evidence(&world.git, workspace, git_subjects)
-                    .map(|s| CrossSubject::Git(s.clone()), |v| CrossValue::Git(v.clone())),
+                    .map(
+                        |s| CrossSubject::Git(s.clone()),
+                        |v| CrossValue::Git(v.clone()),
+                    ),
             );
         }
         evidence
     }
 
-    async fn execute(&mut self, proposal: &GitProposal, _before: &GitWorld) -> Result<GitEffect, GuardError> {
+    async fn execute(
+        &mut self,
+        proposal: &GitProposal,
+        _before: &GitWorld,
+    ) -> Result<GitEffect, GuardError> {
         Ok(match &proposal.action {
             GitAction::Command(spec) => GitEffect::Workspace(self.ws.run(spec.clone(), None).await),
             GitAction::Release {

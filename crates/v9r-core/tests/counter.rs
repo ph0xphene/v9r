@@ -126,7 +126,12 @@ async fn observed_result_contradicting_proposal_is_denied_and_held_for_good() {
     assert_eq!(pre, Verdict::Allow);
     let report = report.unwrap();
     assert!(report.executed && !report.accepted);
-    assert_eq!(report.decision.verdict, Verdict::Deny, "{}", report.decision);
+    assert_eq!(
+        report.decision.verdict,
+        Verdict::Deny,
+        "{}",
+        report.decision
+    );
     assert!(violated(&report.decision, "C2.observed_matches_proposal"));
     // Within the limit, so only the contradiction is reported.
     assert!(!violated(&report.decision, "C1.counter_within_limit"));
@@ -160,7 +165,12 @@ async fn unobservable_result_blocks_and_holds() {
     assert_eq!(pre, Verdict::Allow);
     let report = report.unwrap();
     assert!(report.executed && !report.accepted);
-    assert_eq!(report.decision.verdict, Verdict::Blocked, "{}", report.decision);
+    assert_eq!(
+        report.decision.verdict,
+        Verdict::Blocked,
+        "{}",
+        report.decision
+    );
     assert_eq!(report.receipt.unwrap().after, None);
     assert!(!rt.is_accepting());
 }

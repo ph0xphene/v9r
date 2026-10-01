@@ -107,11 +107,9 @@ type Val<D> = RtValue<<D as EffectDomain>::Value>;
 pub type RtObligation<D> = Obligation<Sub<D>, Val<D>>;
 pub type RtDecision<D> = Decision<Sub<D>, Val<D>>;
 pub type RtEvidence<D> = EvidenceBase<Sub<D>, Val<D>>;
-pub type DomainEvidence<D> =
-    EvidenceBase<<D as EffectDomain>::Subject, <D as EffectDomain>::Value>;
+pub type DomainEvidence<D> = EvidenceBase<<D as EffectDomain>::Subject, <D as EffectDomain>::Value>;
 pub type DomainFact<D> = Fact<<D as EffectDomain>::Subject, <D as EffectDomain>::Value>;
-pub type DomainObligation<D> =
-    Obligation<<D as EffectDomain>::Subject, <D as EffectDomain>::Value>;
+pub type DomainObligation<D> = Obligation<<D as EffectDomain>::Subject, <D as EffectDomain>::Value>;
 
 /// Invariant id of the runtime's acceptance obligation.
 pub const ACCEPTED: &str = "transitions_accepted";
@@ -227,10 +225,8 @@ pub trait Compensable: EffectDomain {
 
     /// Start a compensation from the current reality `before`. Whether it
     /// worked is judged like any effect, by the `Compensated` obligations.
-    async fn compensate(
-        &mut self,
-        before: &Self::Observation,
-    ) -> Result<Self::Effect, Self::Error>;
+    async fn compensate(&mut self, before: &Self::Observation)
+        -> Result<Self::Effect, Self::Error>;
 }
 
 /// Where the runtime records its decisions.
@@ -516,8 +512,12 @@ where
                 receipt: &concluded.receipt,
             },
         };
-        let obligations: Vec<RtObligation<D>> =
-            self.domain.obligations(stage).into_iter().map(lift).collect();
+        let obligations: Vec<RtObligation<D>> = self
+            .domain
+            .obligations(stage)
+            .into_iter()
+            .map(lift)
+            .collect();
         let evidence = self
             .evidence(&obligations, after.as_ref(), Some(&concluded.receipt))
             .await;
@@ -722,7 +722,9 @@ mod tests {
             .to_lowercase();
         for word in ["path", "file", "commit", "git", "workspace", "ref", "refs"] {
             assert!(
-                !code.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == word),
+                !code
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|t| t == word),
                 "runtime code mentions `{word}`"
             );
         }
