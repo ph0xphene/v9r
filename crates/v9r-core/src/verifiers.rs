@@ -31,7 +31,7 @@ pub const MANIFEST: &str = content::DEFINITION;
 pub const NAMES: &str = "names/1";
 
 /// What a walk still needs, or why it cannot finish.
-enum Walk<T> {
+pub(crate) enum Walk<T> {
     Done(T),
     Need(Vec<Key>),
     Fail(String),
@@ -42,7 +42,7 @@ fn names_digest(mut items: Vec<(String, ItemKind)>) -> ContentHash {
     ContentHash::of(&serde_json::to_vec(&items).expect("infallible"))
 }
 
-fn digest_of(def: &str, items: Vec<Item>) -> Option<String> {
+pub(crate) fn digest_of(def: &str, items: Vec<Item>) -> Option<String> {
     Some(
         match def {
             MANIFEST => content::digest(items),
@@ -61,7 +61,7 @@ fn object_key(repo: &str, oid: &str) -> Key {
     Key::new("git_object", [repo, oid])
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -77,7 +77,11 @@ fn object_id(oid_len: usize, stored: &[u8]) -> Option<String> {
 /// The checked `(type, content)` of `oid`: any candidate whose bytes hash
 /// to it, whoever supplied it.
 fn object(inputs: &Inputs, repo: &str, oid: &str) -> Walk<(String, Vec<u8>)> {
-    let key = object_key(repo, oid);
+    object_at(inputs, object_key(repo, oid), oid)
+}
+
+/// The checked `(type, content)` of `oid`, fetched as `key`.
+pub(crate) fn object_at(inputs: &Inputs, key: Key, oid: &str) -> Walk<(String, Vec<u8>)> {
     let Some(candidates) = inputs.get(&key) else {
         return Walk::Need(vec![key]);
     };
@@ -111,7 +115,7 @@ fn object(inputs: &Inputs, repo: &str, oid: &str) -> Walk<(String, Vec<u8>)> {
 }
 
 /// `(mode, name, id)` entries of a tree object.
-fn tree_entries(body: &[u8], id_len: usize) -> Option<Vec<(String, String, String)>> {
+pub(crate) fn tree_entries(body: &[u8], id_len: usize) -> Option<Vec<(String, String, String)>> {
     let raw_len = id_len / 2;
     let mut entries = Vec::new();
     let mut rest = body;
@@ -125,6 +129,75 @@ fn tree_entries(body: &[u8], id_len: usize) -> Option<Vec<(String, String, Strin
         rest = &rest[nul + 1 + raw_len..];
     }
     Some(entries)
+}
+
+/// Items of the tree `tree` and everything below it, each object fetched
+/// as `key_of(id)` and checked against its id; and the basis.
+pub(crate) fn walk_tree(
+    inputs: &Inputs,
+    key_of: &dyn Fn(&str) -> Key,
+    tree: &str,
+    def: &str,
+) -> Walk<(Vec<Item>, Vec<Basis>)> {
+    let mut basis = Vec::new();
+    let mut items = Vec::new();
+    let mut need = Vec::new();
+    let mut pending = vec![(String::new(), tree.to_string())];
+    while let Some((prefix, tree)) = pending.pop() {
+        let body = match object_at(inputs, key_of(&tree), &tree) {
+            Walk::Done((kind, body)) if kind == "tree" => body,
+            Walk::Done((kind, _)) => return Walk::Fail(format!("{tree} is a {kind}, not a tree")),
+            Walk::Need(k) => {
+                need.extend(k);
+                continue;
+            }
+            Walk::Fail(r) => return Walk::Fail(r),
+        };
+        basis.push(Basis::SelfCertified(key_of(&tree)));
+        let Some(entries) = tree_entries(&body, tree.len()) else {
+            return Walk::Fail(format!("tree {tree} does not parse"));
+        };
+        for (mode, name, id) in entries {
+            let path = format!("{prefix}{name}");
+            let kind = match mode.as_str() {
+                "40000" => {
+                    pending.push((format!("{path}/"), id));
+                    continue;
+                }
+                "100644" | "100755" => ItemKind::File,
+                "120000" => ItemKind::Symlink,
+                other => return Walk::Fail(format!("{path}: mode {other} not representable")),
+            };
+            if def == NAMES {
+                items.push(Item {
+                    path,
+                    kind,
+                    sha256: ContentHash::of(b""),
+                });
+                continue;
+            }
+            match object_at(inputs, key_of(&id), &id) {
+                Walk::Done((blob, body)) if blob == "blob" => {
+                    basis.push(Basis::SelfCertified(key_of(&id)));
+                    items.push(Item {
+                        path,
+                        kind,
+                        sha256: ContentHash::of(&body),
+                    });
+                }
+                Walk::Done((other, _)) => {
+                    return Walk::Fail(format!("{path}: {other}, not a blob"))
+                }
+                Walk::Need(k) => need.extend(k),
+                Walk::Fail(r) => return Walk::Fail(r),
+            }
+        }
+    }
+    if need.is_empty() {
+        Walk::Done((items, basis))
+    } else {
+        Walk::Need(need)
+    }
 }
 
 impl GitObjects {
@@ -152,65 +225,12 @@ impl GitObjects {
         else {
             return Walk::Fail("commit without a tree line".into());
         };
-        let mut items = Vec::new();
-        let mut need = Vec::new();
-        let mut pending = vec![(String::new(), tree.to_string())];
-        while let Some((prefix, tree)) = pending.pop() {
-            let body = match object(inputs, repo, &tree) {
-                Walk::Done((kind, body)) if kind == "tree" => body,
-                Walk::Done((kind, _)) => {
-                    return Walk::Fail(format!("{tree} is a {kind}, not a tree"))
-                }
-                Walk::Need(k) => {
-                    need.extend(k);
-                    continue;
-                }
-                Walk::Fail(r) => return Walk::Fail(r),
-            };
-            basis.push(Basis::SelfCertified(object_key(repo, &tree)));
-            let Some(entries) = tree_entries(&body, tree.len()) else {
-                return Walk::Fail(format!("tree {tree} does not parse"));
-            };
-            for (mode, name, id) in entries {
-                let path = format!("{prefix}{name}");
-                let kind = match mode.as_str() {
-                    "40000" => {
-                        pending.push((format!("{path}/"), id));
-                        continue;
-                    }
-                    "100644" | "100755" => ItemKind::File,
-                    "120000" => ItemKind::Symlink,
-                    other => return Walk::Fail(format!("{path}: mode {other} not representable")),
-                };
-                if def == NAMES {
-                    items.push(Item {
-                        path,
-                        kind,
-                        sha256: ContentHash::of(b""),
-                    });
-                    continue;
-                }
-                match object(inputs, repo, &id) {
-                    Walk::Done((blob, body)) if blob == "blob" => {
-                        basis.push(Basis::SelfCertified(object_key(repo, &id)));
-                        items.push(Item {
-                            path,
-                            kind,
-                            sha256: ContentHash::of(&body),
-                        });
-                    }
-                    Walk::Done((other, _)) => {
-                        return Walk::Fail(format!("{path}: {other}, not a blob"))
-                    }
-                    Walk::Need(k) => need.extend(k),
-                    Walk::Fail(r) => return Walk::Fail(r),
-                }
+        match walk_tree(inputs, &|oid| object_key(repo, oid), tree, def) {
+            Walk::Done((items, more)) => {
+                basis.extend(more);
+                Walk::Done((items, basis))
             }
-        }
-        if need.is_empty() {
-            Walk::Done((items, basis))
-        } else {
-            Walk::Need(need)
+            other => other,
         }
     }
 }
@@ -259,7 +279,7 @@ impl Verifier for GitObjects {
 pub struct FsContent;
 
 /// A raw fs input: vouched for if possible, else a lone claim (unvouched).
-fn observed(inputs: &Inputs, key: &Key) -> Walk<(Term, Basis)> {
+pub(crate) fn observed(inputs: &Inputs, key: &Key) -> Walk<(Term, Basis)> {
     if !inputs.contains_key(key) {
         return Walk::Need(vec![key.clone()]);
     }
