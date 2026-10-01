@@ -20,6 +20,7 @@ pub mod policy;
 pub mod runtime;
 pub mod state;
 pub mod task;
+pub mod temporal;
 pub mod trace;
 pub mod trusted;
 pub mod vfs;
