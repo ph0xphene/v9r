@@ -8,6 +8,7 @@
 //! | `tree_content` | `repo`, `commit oid` | `Digest`: the `crate::content` manifest of the commit's tree |
 //! | `refs` | `repo` | `Map`: every ref name (and `HEAD`) → target |
 //! | `commit` | `repo`, `oid` | `Bool`: the object exists and is a commit |
+//! | `git_object` | `repo`, `oid` | `Bytes`: the stored object, `<type> <size>\0<content>` (raw observation) |
 //!
 //! Lineage: every answer names its plumbing method and the state it read
 //! (the repo's ref digest, or its object store for content-addressed
@@ -64,6 +65,18 @@ impl GitEvidenceProvider {
         known(args[0]).then_some(subject)
     }
 
+    /// The repo and id of a `git_object(repo, oid)` key.
+    fn object_key<'k>(&self, key: &'k Key) -> Option<(&'k str, Oid)> {
+        match (key.kind.as_str(), key.args.as_slice()) {
+            ("git_object", [repo, oid])
+                if self.observer.repos().iter().any(|r| &r.path == repo) =>
+            {
+                Some((repo, Oid::parse(oid)?))
+            }
+            _ => None,
+        }
+    }
+
     /// The repo of a `refs(repo)` key.
     fn refs_repo<'k>(&self, key: &'k Key) -> Option<&'k str> {
         match (key.kind.as_str(), key.args.as_slice()) {
@@ -114,13 +127,26 @@ impl EvidenceProvider for GitEvidenceProvider {
     }
 
     fn answers(&self, key: &Key) -> bool {
-        self.subject(key).is_some() || self.refs_repo(key).is_some()
+        self.subject(key).is_some()
+            || self.refs_repo(key).is_some()
+            || self.object_key(key).is_some()
     }
 
     fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
         let observation = self.observer.observe();
         let mut out = Vec::new();
         for key in keys {
+            if let Some((repo, oid)) = self.object_key(key) {
+                // Raw: the bytes the id is the hash of. Checkable by anyone.
+                if let Some(stored) = self.observer.object(&observation, repo, &oid) {
+                    out.push(Answer::Verified(attestor.attest(
+                        (*key).clone(),
+                        Term::Bytes(stored),
+                        "cat-file --batch",
+                    )));
+                }
+                continue;
+            }
             if let Some(repo) = self.refs_repo(key) {
                 let (Some(refs), Some(digest)) =
                     (observation.refs_map(repo), observation.refs_digest(repo))

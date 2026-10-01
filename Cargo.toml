@@ -37,6 +37,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rustyline = { version = "=14.0.0", default-features = false }
 colored = "2.1"
 sha2 = "0.10"
+sha1 = "0.10"
 libc = "0.2"
 
 v9r-core = { path = "crates/v9r-core" }

@@ -24,6 +24,7 @@ pub mod task;
 pub mod temporal;
 pub mod trace;
 pub mod trusted;
+pub mod verifiers;
 pub mod verify;
 pub mod vfs;
 

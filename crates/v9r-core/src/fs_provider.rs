@@ -3,6 +3,9 @@
 //! | Kind | Args | Value |
 //! |---|---|---|
 //! | `dir_content` | `dir` (relative to the root) | `Digest`: the `crate::content` manifest of the directory |
+//! | `fs_listing` | `dir`, or `.` | `Map`: every entry below it → `file`, `dir`, `symlink` or `other` (raw observation) |
+//! | `fs_file` | `path` | `Bytes`: a regular file's content (raw observation) |
+//! | `fs_link` | `path` | `Text`: a symlink's target (raw observation) |
 //! | `entries` | `dir`, or `.` for the root | `Map`: every entry below it, root-relative path → `file:<sha256>`, `dir`, `symlink:<target>` or `other` |
 //!
 //! Lineage: every answer names its method and the tree digest it read;
@@ -51,7 +54,8 @@ impl EvidenceProvider for FilesystemEvidenceProvider {
     fn answers(&self, key: &Key) -> bool {
         match (key.kind.as_str(), key.args.as_slice()) {
             ("dir_content", [dir]) => relative_dir(dir),
-            ("entries", [dir]) => dir == "." || relative_dir(dir),
+            ("entries" | "fs_listing", [dir]) => dir == "." || relative_dir(dir),
+            ("fs_file" | "fs_link", [path]) => relative_dir(path),
             _ => false,
         }
     }
@@ -77,6 +81,45 @@ impl EvidenceProvider for FilesystemEvidenceProvider {
             let dir = key.args[0].as_str();
             match key.kind.as_str() {
                 "entries" => out.extend(walk(dir).map(Answer::Verified)),
+                "fs_listing" => {
+                    let Some(Term::Map(entries)) = walk(dir).map(|a| a.fact().value.clone()) else {
+                        continue;
+                    };
+                    let kinds = entries
+                        .into_iter()
+                        .map(|(path, value)| {
+                            let kind = value.split(':').next().unwrap_or("other").to_string();
+                            (path, kind)
+                        })
+                        .collect();
+                    out.push(Answer::Verified(
+                        attestor
+                            .attest((*key).clone(), Term::Map(kinds), "directory walk")
+                            .observed(state.clone()),
+                    ));
+                }
+                "fs_file" | "fs_link" => {
+                    let full = self.root.join(dir);
+                    let Ok(meta) = std::fs::symlink_metadata(&full) else {
+                        continue;
+                    };
+                    let value = match key.kind.as_str() {
+                        "fs_file" if meta.file_type().is_file() => {
+                            std::fs::read(&full).ok().map(Term::Bytes)
+                        }
+                        "fs_link" if meta.file_type().is_symlink() => std::fs::read_link(&full)
+                            .ok()
+                            .and_then(|t| t.to_str().map(|t| Term::Text(t.to_string()))),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        out.push(Answer::Verified(attestor.attest(
+                            (*key).clone(),
+                            value,
+                            "read",
+                        )));
+                    }
+                }
                 _ => {
                     let (Some(support), Some(digest)) = (
                         walk(dir),

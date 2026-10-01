@@ -386,6 +386,39 @@ impl GitObserver {
 
     /// Is `ancestor` an ancestor of (or equal to) `descendant`? `None` if
     /// git cannot tell (e.g. a missing object): unknown, never "no".
+    /// The stored form of one object, `<type> <size>\0<content>`, exactly
+    /// the bytes its id is the hash of. `None` if it cannot be read.
+    pub(crate) fn object(
+        &self,
+        observation: &GitObservation,
+        repo: &str,
+        oid: &Oid,
+    ) -> Option<Vec<u8>> {
+        let state = observation.repos.get(repo)?.as_ref().ok()?;
+        let request = format!("{}\n", oid.as_str());
+        let out = self
+            .git(
+                &state.git_dir,
+                &["cat-file", "--batch"],
+                Some(request.as_bytes()),
+            )
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let newline = out.stdout.iter().position(|b| *b == b'\n')?;
+        let header = std::str::from_utf8(&out.stdout[..newline]).ok()?;
+        let mut fields = header.split(' ');
+        if fields.next()? != oid.as_str() {
+            return None;
+        }
+        let (kind, size) = (fields.next()?, fields.next()?.parse::<usize>().ok()?);
+        let body = out.stdout.get(newline + 1..newline + 1 + size)?;
+        let mut stored = format!("{kind} {size}\0").into_bytes();
+        stored.extend_from_slice(body);
+        Some(stored)
+    }
+
     /// `Some(false)` if the object is absent or not a commit; `None` if
     /// that cannot be established.
     fn is_commit(&self, git_dir: &Path, oid: &Oid) -> Option<bool> {
