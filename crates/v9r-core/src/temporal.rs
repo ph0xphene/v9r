@@ -219,7 +219,11 @@ pub fn require(invariant: &str, subject: TKey, value: Term) -> TObligation {
 /// Read `key`'s verified value in `snapshot` and pin it: the obligation
 /// holds only if that value really is the snapshot's verified value.
 /// Without one, the pin is undetermined.
-pub fn pin<'s>(invariant: &str, snapshot: &'s Snapshot, key: &Key) -> (TObligation, Option<&'s Term>) {
+pub fn pin<'s>(
+    invariant: &str,
+    snapshot: &'s Snapshot,
+    key: &Key,
+) -> (TObligation, Option<&'s Term>) {
     let value = snapshot.verified(key);
     (
         require(
@@ -301,7 +305,11 @@ pub struct TemporalDomain<P, A> {
 }
 
 impl<P, A> TemporalDomain<P, A> {
-    pub fn new(registry: Registry, invariants: Vec<Box<dyn TransitionInvariant<P>>>, actor: A) -> Self {
+    pub fn new(
+        registry: Registry,
+        invariants: Vec<Box<dyn TransitionInvariant<P>>>,
+        actor: A,
+    ) -> Self {
         let mut watches: Vec<Key> = invariants.iter().flat_map(|i| i.watches()).collect();
         watches.sort();
         watches.dedup();
@@ -463,10 +471,12 @@ impl<P: Clone + fmt::Debug, A: Actor<P>> EffectDomain for TemporalDomain<P, A> {
             }
         }
         if !live.is_empty() {
-            evidence.merge(&self.registry.collect(&live).map(
-                |key| TKey::now(key.clone()),
-                Term::clone,
-            ));
+            evidence.merge(
+                &self
+                    .registry
+                    .collect(&live)
+                    .map(|key| TKey::now(key.clone()), Term::clone),
+            );
         }
         evidence
     }
@@ -525,11 +535,20 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        for line in source.lines().filter(|l| l.trim_start().starts_with("use ")) {
+        for line in source
+            .lines()
+            .filter(|l| l.trim_start().starts_with("use "))
+        {
             assert!(
-                ["std::", "serde::", "crate::kernel::", "crate::runtime::", "crate::graph::"]
-                    .iter()
-                    .any(|allowed| line.contains(allowed)),
+                [
+                    "std::",
+                    "serde::",
+                    "crate::kernel::",
+                    "crate::runtime::",
+                    "crate::graph::"
+                ]
+                .iter()
+                .any(|allowed| line.contains(allowed)),
                 "{line}"
             );
         }
@@ -539,7 +558,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             .to_lowercase();
-        for word in ["path", "file", "commit", "git", "workspace", "ci", "artifact", "ref"] {
+        for word in [
+            "path",
+            "file",
+            "commit",
+            "git",
+            "workspace",
+            "ci",
+            "artifact",
+            "ref",
+        ] {
             assert!(
                 !code
                     .split(|c: char| !c.is_alphanumeric() && c != '_')

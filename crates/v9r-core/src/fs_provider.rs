@@ -61,8 +61,7 @@ impl EvidenceProvider for FilesystemEvidenceProvider {
                 let value = match key.kind.as_str() {
                     "entries" => Term::Map(entries(observation.state(), &key.args[0])?),
                     _ => Term::Digest(
-                        content::from_fs_state(observation.state(), &key.args[0], &[])?
-                            .to_string(),
+                        content::from_fs_state(observation.state(), &key.args[0], &[])?.to_string(),
                     ),
                 };
                 Some(Answer::Verified(attestor.attest(

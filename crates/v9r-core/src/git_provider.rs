@@ -55,9 +55,7 @@ impl GitEvidenceProvider {
     /// The repo of a `refs(repo)` key.
     fn refs_repo<'k>(&self, key: &'k Key) -> Option<&'k str> {
         match (key.kind.as_str(), key.args.as_slice()) {
-            ("refs", [repo]) if self.observer.repos().iter().any(|r| &r.path == repo) => {
-                Some(repo)
-            }
+            ("refs", [repo]) if self.observer.repos().iter().any(|r| &r.path == repo) => Some(repo),
             _ => None,
         }
     }
