@@ -145,15 +145,18 @@ impl Snapshot {
     fn take(registry: &Registry, keys: &[Key]) -> Self {
         let asked: Vec<&Key> = keys.iter().collect();
         let first = registry.collect(&asked);
-        let mut evidence = registry.collect(&asked);
+        let (mut evidence, round) = registry.collect_round(&asked);
         let inconsistent: Vec<Key> = keys
             .iter()
             .filter(|k| !same_readings(first.get(k), evidence.get(k)))
             .cloned()
             .collect();
         evidence.forget(|k| inconsistent.contains(k));
+        let id = tick();
+        // The kept reading's lineage now names this snapshot.
+        registry.assign_snapshot(round, id);
         Self {
-            id: tick(),
+            id,
             evidence,
             inconsistent,
         }

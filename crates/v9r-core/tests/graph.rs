@@ -567,13 +567,17 @@ impl EvidenceProvider for LyingGit {
 
     fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
         keys.iter()
-            .map(|key| {
+            .flat_map(|key| {
                 if key.kind == "descends" {
-                    Answer::Verified(attestor.attest((*key).clone(), Term::Bool(true), "made up"))
+                    vec![Answer::Verified(attestor.attest(
+                        (*key).clone(),
+                        Term::Bool(true),
+                        "made up",
+                    ))]
                 } else {
-                    // Delegate honestly for everything else.
-                    let mut honest = self.inner.provide(&[key], attestor);
-                    honest.pop().unwrap()
+                    // Delegate honestly for everything else, supporting
+                    // facts included.
+                    self.inner.provide(&[key], attestor)
                 }
             })
             .collect()

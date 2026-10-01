@@ -5,6 +5,10 @@
 //! | `dir_content` | `dir` (relative to the root) | `Digest`: the `crate::content` manifest of the directory |
 //! | `entries` | `dir`, or `.` for the root | `Map`: every entry below it, root-relative path → `file:<sha256>`, `dir`, `symlink:<target>` or `other` |
 //!
+//! Lineage: every answer names its method and the tree digest it read;
+//! `dir_content` claims the `crate::content` definition and depends on a
+//! supporting `entries` fact for the same directory from the same walk.
+//!
 //! Each request observes the tree afresh. A directory that cannot be
 //! observed, or does not exist, yields no answer; neither does `entries`
 //! if any part of the tree below it could not be observed.
@@ -14,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::content;
 use crate::effect::Observation;
-use crate::graph::{Answer, Attestor, EvidenceProvider, Key, Term};
+use crate::graph::{Answer, Attestor, EvidenceProvider, Key, Method, Term};
 use crate::state::{EntryKind, FsState};
 
 pub struct FilesystemEvidenceProvider {
@@ -56,21 +60,45 @@ impl EvidenceProvider for FilesystemEvidenceProvider {
         let Ok(observation) = Observation::capture(&self.root) else {
             return Vec::new();
         };
-        keys.iter()
-            .filter_map(|key| {
-                let value = match key.kind.as_str() {
-                    "entries" => Term::Map(entries(observation.state(), &key.args[0])?),
-                    _ => Term::Digest(
-                        content::from_fs_state(observation.state(), &key.args[0], &[])?.to_string(),
-                    ),
-                };
-                Some(Answer::Verified(attestor.attest(
-                    (*key).clone(),
-                    value,
-                    format!("tree observation {}", observation.digest()),
-                )))
-            })
-            .collect()
+        let state = format!("tree {}", observation.digest());
+        let walk = |dir: &str| {
+            Some(
+                attestor
+                    .attest(
+                        Key::new("entries", [dir]),
+                        Term::Map(entries(observation.state(), dir)?),
+                        "tree walk (symlinks not followed)",
+                    )
+                    .observed(state.clone()),
+            )
+        };
+        let mut out = Vec::new();
+        for key in keys {
+            let dir = key.args[0].as_str();
+            match key.kind.as_str() {
+                "entries" => out.extend(walk(dir).map(Answer::Verified)),
+                _ => {
+                    let (Some(support), Some(digest)) = (
+                        walk(dir),
+                        content::from_fs_state(observation.state(), dir, &[]),
+                    ) else {
+                        continue;
+                    };
+                    let attested = attestor
+                        .attest(
+                            (*key).clone(),
+                            Term::Digest(digest.to_string()),
+                            Method::new("content manifest of the tree walk")
+                                .defined_as(content::DEFINITION),
+                        )
+                        .observed(state.clone())
+                        .depends_on(&support);
+                    out.push(Answer::Verified(support));
+                    out.push(Answer::Verified(attested));
+                }
+            }
+        }
+        out
     }
 }
 

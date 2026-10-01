@@ -7,14 +7,22 @@
 //! | `descends` | `repo`, `ancestor oid`, `descendant oid` | `Bool` |
 //! | `tree_content` | `repo`, `commit oid` | `Digest`: the `crate::content` manifest of the commit's tree |
 //! | `refs` | `repo` | `Map`: every ref name (and `HEAD`) → target |
+//! | `commit` | `repo`, `oid` | `Bool`: the object exists and is a commit |
+//!
+//! Lineage: every answer names its plumbing method and the state it read
+//! (the repo's ref digest, or its object store for content-addressed
+//! facts). `tree_content` claims the `crate::content` definition. Facts
+//! about a commit (`tree_content`, `descends`) depend on a supporting
+//! `commit` fact from the same response.
 //!
 //! Object ids are validated before anything reaches `git`; a key with a
 //! malformed id is not answered.
 
 use std::path::Path;
 
+use crate::content;
 use crate::git::{GitObserver, GitRepo, GitSubject, GitValue, Oid};
-use crate::graph::{Answer, Attestor, EvidenceProvider, Key, Term};
+use crate::graph::{Answer, Attestor, EvidenceProvider, Key, Method, Term};
 
 pub struct GitEvidenceProvider {
     id: String,
@@ -43,6 +51,10 @@ impl GitEvidenceProvider {
                 ancestor: Oid::parse(ancestor)?,
                 descendant: Oid::parse(descendant)?,
             },
+            ("commit", [repo, oid]) => GitSubject::IsCommit {
+                repo: repo.to_string(),
+                oid: Oid::parse(oid)?,
+            },
             ("tree_content", [repo, commit]) => GitSubject::ContentManifest {
                 repo: repo.to_string(),
                 commit: Oid::parse(commit)?,
@@ -58,6 +70,30 @@ impl GitEvidenceProvider {
             ("refs", [repo]) if self.observer.repos().iter().any(|r| &r.path == repo) => Some(repo),
             _ => None,
         }
+    }
+}
+
+fn method(subject: &GitSubject) -> Method {
+    match subject {
+        GitSubject::IsCommit { .. } => Method::new("cat-file -e, cat-file -t"),
+        GitSubject::Descends { .. } => {
+            Method::new("merge-base --is-ancestor (replace refs and grafts disabled)")
+        }
+        GitSubject::ContentManifest { .. } => {
+            Method::new("ls-tree + cat-file").defined_as(content::DEFINITION)
+        }
+        _ => Method::new("for-each-ref"),
+    }
+}
+
+/// The commit a fact is about, for facts that presuppose one.
+fn about_commit(subject: &GitSubject) -> Option<(&str, &Oid)> {
+    match subject {
+        GitSubject::ContentManifest { repo, commit } => Some((repo, commit)),
+        GitSubject::Descends {
+            repo, descendant, ..
+        } => Some((repo, descendant)),
+        _ => None,
     }
 }
 
@@ -83,24 +119,65 @@ impl EvidenceProvider for GitEvidenceProvider {
 
     fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer> {
         let observation = self.observer.observe();
-        keys.iter()
-            .filter_map(|key| {
-                if let Some(repo) = self.refs_repo(key) {
-                    let refs = observation.refs_map(repo)?;
-                    return Some(Answer::Verified(attestor.attest(
-                        (*key).clone(),
-                        Term::Map(refs),
-                        "for-each-ref",
-                    )));
+        let mut out = Vec::new();
+        for key in keys {
+            if let Some(repo) = self.refs_repo(key) {
+                let (Some(refs), Some(digest)) =
+                    (observation.refs_map(repo), observation.refs_digest(repo))
+                else {
+                    continue;
+                };
+                out.push(Answer::Verified(
+                    attestor
+                        .attest((*key).clone(), Term::Map(refs), "for-each-ref")
+                        .observed(format!("refs {digest}")),
+                ));
+                continue;
+            }
+            let Some(subject) = self.subject(key) else {
+                continue;
+            };
+            let Some(value) = self
+                .observer
+                .answer(&observation, None, &subject)
+                .and_then(|(value, _)| term(value))
+            else {
+                continue;
+            };
+            let state = |repo: &str| match &subject {
+                GitSubject::Ref { .. } => observation
+                    .refs_digest(repo)
+                    .map_or("refs unknown".to_string(), |d| format!("refs {d}")),
+                // Content-addressed: no ref state is involved.
+                _ => format!("object store of {repo}"),
+            };
+            let mut attested = attestor
+                .attest((*key).clone(), value, method(&subject))
+                .observed(state(&key.args[0]));
+            // Show the work: the commit the fact is about exists.
+            if let Some((repo, oid)) = about_commit(&subject) {
+                let support = GitSubject::IsCommit {
+                    repo: repo.to_string(),
+                    oid: oid.clone(),
+                };
+                if let Some(value) = self
+                    .observer
+                    .answer(&observation, None, &support)
+                    .and_then(|(value, _)| term(value))
+                {
+                    let support = attestor
+                        .attest(
+                            Key::new("commit", [repo, oid.as_str()]),
+                            value,
+                            method(&support),
+                        )
+                        .observed(state(repo));
+                    attested = attested.depends_on(&support);
+                    out.push(Answer::Verified(support));
                 }
-                let subject = self.subject(key)?;
-                let (value, basis) = self.observer.answer(&observation, None, &subject)?;
-                Some(Answer::Verified(attestor.attest(
-                    (*key).clone(),
-                    term(value)?,
-                    basis,
-                )))
-            })
-            .collect()
+            }
+            out.push(Answer::Verified(attested));
+        }
+        out
     }
 }

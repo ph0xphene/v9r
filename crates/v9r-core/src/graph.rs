@@ -128,6 +128,89 @@ pub trait EvidenceProvider: Send + Sync {
     fn provide(&self, keys: &[&Key], attestor: &Attestor) -> Vec<Answer>;
 }
 
+/// How a provider says it established a fact. Everything here is the
+/// provider's **claim**: the registry records it but cannot check it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Method {
+    /// The procedure, e.g. `cat-file -t`.
+    pub name: String,
+    /// The definition the value follows (e.g. a digest normal form), if
+    /// the value is not self-describing.
+    pub definition: Option<String>,
+}
+
+impl Method {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            definition: None,
+        }
+    }
+
+    pub fn defined_as(mut self, definition: impl Into<String>) -> Self {
+        self.definition = Some(definition.into());
+        self
+    }
+}
+
+impl From<&str> for Method {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for Method {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+pub type LineageId = u64;
+
+/// Where a verified fact came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Lineage {
+    pub id: LineageId,
+    pub key: Key,
+    pub value: Term,
+    // Established by the registry.
+    pub provider: String,
+    pub request: u64,
+    /// The collection round it was gathered in.
+    pub round: u64,
+    /// The snapshot that round belongs to, if a temporal layer kept it.
+    pub snapshot: Option<u64>,
+    /// Gathered only to support another fact (not asked for).
+    pub supporting: bool,
+    /// Facts it depends on: claimed by the provider, *checked* by the
+    /// registry to come from the same response.
+    pub depends_on: Vec<LineageId>,
+    // Claimed by the provider.
+    pub method: Method,
+    /// The state it says it observed (e.g. a tree digest).
+    pub observed: Vec<String>,
+}
+
+static NEXT_LINEAGE: AtomicU64 = AtomicU64::new(1);
+
+/// The kernel provenance basis that carries a lineage id.
+pub fn lineage_token(id: LineageId) -> String {
+    format!("lineage:L{id}")
+}
+
+/// Lineage ids mentioned in a text (e.g. a kernel finding's reason).
+pub fn lineage_ids(text: &str) -> Vec<LineageId> {
+    text.match_indices("lineage:L")
+        .filter_map(|(i, m)| {
+            let digits: String = text[i + m.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+        .collect()
+}
+
 /// Lets one provider vouch for facts during one request.
 pub struct Attestor {
     provider: String,
@@ -135,16 +218,19 @@ pub struct Attestor {
 }
 
 impl Attestor {
-    /// Vouch that `key` has `value`, observed on `basis`.
-    pub fn attest(&self, key: Key, value: Term, basis: impl Into<String>) -> Attested {
+    /// Vouch that `key` has `value`, established by `method`.
+    pub fn attest(&self, key: Key, value: Term, method: impl Into<Method>) -> Attested {
         Attested {
             provider: self.provider.clone(),
             request: self.request,
+            id: NEXT_LINEAGE.fetch_add(1, Ordering::Relaxed),
             fact: Verified::attest(Fact {
                 subject: key,
                 value,
             }),
-            basis: basis.into(),
+            method: method.into(),
+            observed: Vec::new(),
+            depends_on: Vec::new(),
         }
     }
 }
@@ -153,13 +239,33 @@ impl Attestor {
 pub struct Attested {
     provider: String,
     request: u64,
+    id: LineageId,
     fact: Verified<GraphFact>,
-    basis: String,
+    method: Method,
+    observed: Vec<String>,
+    depends_on: Vec<LineageId>,
 }
 
 impl Attested {
     pub fn fact(&self) -> &GraphFact {
         self.fact.get()
+    }
+
+    pub fn id(&self) -> LineageId {
+        self.id
+    }
+
+    /// Claim the state this was observed in.
+    pub fn observed(mut self, state: impl Into<String>) -> Self {
+        self.observed.push(state.into());
+        self
+    }
+
+    /// Claim this was derived from `other`, which must be returned in the
+    /// same response.
+    pub fn depends_on(mut self, other: &Attested) -> Self {
+        self.depends_on.push(other.id);
+        self
     }
 }
 
@@ -201,13 +307,25 @@ impl Plan {
     }
 }
 
+/// What the host declares about a kind.
+#[derive(Clone, Debug, Default)]
+struct KindRules {
+    /// Answers must claim this definition.
+    definition: Option<String>,
+    /// Only these providers may answer.
+    observers: Option<Vec<String>>,
+}
+
 #[derive(Default)]
 struct Inner {
     providers: Vec<(Arc<dyn EvidenceProvider>, Trust)>,
     discarded: Vec<Discarded>,
+    lineage: BTreeMap<LineageId, Lineage>,
+    kinds: BTreeMap<String, KindRules>,
 }
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+static NEXT_ROUND: AtomicU64 = AtomicU64::new(1);
 
 /// The set of registered providers. Cloning shares it. Whoever holds it
 /// decides which providers are trusted: it is privileged.
@@ -240,6 +358,26 @@ impl Registry {
         inner.providers.len() != before
     }
 
+    /// Declare the definition answers of `kind` must follow. Answers that
+    /// claim another (or none) are discarded: values under different
+    /// definitions must not meet in one decision.
+    pub fn define(&self, kind: &str, definition: &str) {
+        self.inner()
+            .kinds
+            .entry(kind.to_string())
+            .or_default()
+            .definition = Some(definition.to_string());
+    }
+
+    /// Declare which providers may answer `kind`.
+    pub fn restrict(&self, kind: &str, observers: &[&str]) {
+        self.inner()
+            .kinds
+            .entry(kind.to_string())
+            .or_default()
+            .observers = Some(observers.iter().map(|s| s.to_string()).collect());
+    }
+
     pub fn plan<'a>(&self, keys: impl IntoIterator<Item = &'a Key>) -> Plan {
         let providers: Vec<_> = self.inner().providers.clone();
         Plan {
@@ -262,6 +400,19 @@ impl Registry {
         self.inner().discarded.clone()
     }
 
+    pub fn lineage(&self, id: LineageId) -> Option<Lineage> {
+        self.inner().lineage.get(&id).cloned()
+    }
+
+    /// Record that `round` was kept as snapshot `snapshot`.
+    pub fn assign_snapshot(&self, round: u64, snapshot: u64) {
+        for lineage in self.inner().lineage.values_mut() {
+            if lineage.round == round {
+                lineage.snapshot = Some(snapshot);
+            }
+        }
+    }
+
     /// The single verified value for `key` right now, if there is one.
     /// Read-only; the answer is data, not authority.
     pub fn query(&self, key: &Key) -> Option<Term> {
@@ -276,10 +427,20 @@ impl Registry {
 
     /// Ask every provider that answers any of `keys`, and merge.
     pub fn collect(&self, keys: &[&Key]) -> GraphEvidence {
+        self.collect_round(keys).0
+    }
+
+    /// Like [`Registry::collect`], also returning the round id.
+    pub fn collect_round(&self, keys: &[&Key]) -> (GraphEvidence, u64) {
+        let round = NEXT_ROUND.fetch_add(1, Ordering::Relaxed);
         // Never call providers under the lock.
-        let providers: Vec<_> = self.inner().providers.clone();
+        let (providers, kinds) = {
+            let inner = self.inner();
+            (inner.providers.clone(), inner.kinds.clone())
+        };
         let mut evidence = GraphEvidence::new();
         let mut discarded = Vec::new();
+        let mut lineage = Vec::new();
         for (provider, trust) in providers {
             let id = provider.id().to_string();
             let asked: Vec<&Key> = keys
@@ -294,35 +455,25 @@ impl Registry {
                 provider: id.clone(),
                 request: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
             };
+            let mut discard = |key: &Key, reason: String| {
+                discarded.push(Discarded {
+                    provider: id.clone(),
+                    key: key.clone(),
+                    reason,
+                })
+            };
+            // Pass 1: bind to this provider and request; apply kind rules.
+            let mut valid: BTreeMap<LineageId, Attested> = BTreeMap::new();
             for answer in provider.provide(&asked, &attestor) {
-                let mut discard = |key: &Key, reason: &str| {
-                    discarded.push(Discarded {
-                        provider: id.clone(),
-                        key: key.clone(),
-                        reason: reason.to_string(),
-                    })
-                };
                 match answer {
                     Answer::Verified(attested) => {
-                        let key = &attested.fact().subject;
+                        let key = attested.fact().subject.clone();
                         if attested.provider != id || attested.request != attestor.request {
-                            discard(key, "attestation from another provider or request");
-                        } else if !asked.contains(&key) {
-                            discard(key, "not asked of this provider");
-                        } else if trust == Trust::ClaimsOnly {
-                            let fact = attested.fact.into_inner();
-                            evidence.add_proposed(Proposed {
-                                value: fact,
-                                source: format!("provider:{id} (claims only)"),
-                            });
+                            discard(&key, "attestation from another provider or request".into());
+                        } else if let Some(reason) = kind_violation(&kinds, &id, &attested) {
+                            discard(&key, reason);
                         } else {
-                            evidence.add_verified(
-                                attested.fact,
-                                Provenance {
-                                    observer: format!("provider:{id}"),
-                                    basis: attested.basis,
-                                },
-                            );
+                            valid.insert(attested.id, attested);
                         }
                     }
                     Answer::Proposed { key, value, note } => {
@@ -335,14 +486,111 @@ impl Registry {
                                 source: format!("provider:{id}: {note}"),
                             });
                         } else {
-                            discard(&key, "not asked of this provider");
+                            discard(&key, "not asked of this provider".into());
                         }
                     }
                 }
             }
+            // Pass 2: dependencies must lie within this response.
+            let foreign: Vec<LineageId> = valid
+                .values()
+                .filter(|a| a.depends_on.iter().any(|d| !valid.contains_key(d)))
+                .map(|a| a.id)
+                .collect();
+            for lid in foreign {
+                let a = valid.remove(&lid).expect("present");
+                discard(
+                    &a.fact().subject,
+                    "depends on evidence outside this response (another request or snapshot)"
+                        .into(),
+                );
+            }
+            // Answers to asked keys, and whatever they (transitively)
+            // depend on as support.
+            let mut keep: Vec<LineageId> = valid
+                .values()
+                .filter(|a| asked.contains(&&a.fact().subject))
+                .map(|a| a.id)
+                .collect();
+            let mut i = 0;
+            while i < keep.len() {
+                let deps = valid
+                    .get(&keep[i])
+                    .map(|a| a.depends_on.clone())
+                    .unwrap_or_default();
+                for dep in deps {
+                    if !keep.contains(&dep) && valid.contains_key(&dep) {
+                        keep.push(dep);
+                    }
+                }
+                i += 1;
+            }
+            for (lid, attested) in valid {
+                let key = attested.fact().subject.clone();
+                if !keep.contains(&lid) {
+                    discard(&key, "not asked of this provider".into());
+                    continue;
+                }
+                let supporting = !asked.contains(&&key);
+                lineage.push(Lineage {
+                    id: lid,
+                    value: attested.fact().value.clone(),
+                    key,
+                    provider: id.clone(),
+                    request: attested.request,
+                    round,
+                    snapshot: None,
+                    supporting,
+                    depends_on: attested.depends_on,
+                    method: attested.method,
+                    observed: attested.observed,
+                });
+                if supporting {
+                    continue;
+                }
+                if trust == Trust::ClaimsOnly {
+                    evidence.add_proposed(Proposed {
+                        value: attested.fact.into_inner(),
+                        source: format!("provider:{id} (claims only) {}", lineage_token(lid)),
+                    });
+                } else {
+                    evidence.add_verified(
+                        attested.fact,
+                        Provenance {
+                            observer: format!("provider:{id}"),
+                            basis: lineage_token(lid),
+                        },
+                    );
+                }
+            }
         }
-        self.inner().discarded.extend(discarded);
-        evidence
+        let mut inner = self.inner();
+        inner.discarded.extend(discarded);
+        inner.lineage.extend(lineage.into_iter().map(|l| (l.id, l)));
+        (evidence, round)
+    }
+}
+
+/// Why the host's declarations for the attested kind refuse it, if they do.
+fn kind_violation(
+    kinds: &BTreeMap<String, KindRules>,
+    provider: &str,
+    attested: &Attested,
+) -> Option<String> {
+    let rules = kinds.get(&attested.fact().subject.kind)?;
+    if let Some(observers) = &rules.observers {
+        if !observers.iter().any(|o| o == provider) {
+            return Some(format!("{provider} is not an observer of this kind"));
+        }
+    }
+    match (&rules.definition, &attested.method.definition) {
+        (Some(required), Some(claimed)) if required != claimed => Some(format!(
+            "definition mismatch: kind requires {required}, answer claims {claimed}"
+        )),
+        (Some(required), None) => Some(format!(
+            "definition mismatch: kind requires {required}, answer claims none"
+        )),
+        _ => None,
     }
 }
 

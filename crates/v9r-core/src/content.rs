@@ -19,6 +19,10 @@ use serde::Serialize;
 
 use crate::state::{ContentHash, EntryKind, FsState};
 
+/// Name of this normal form, for provenance: two digests are comparable
+/// only if both were computed by it.
+pub const DEFINITION: &str = "v9r-content-manifest/1";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {

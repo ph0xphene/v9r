@@ -116,6 +116,11 @@ pub enum GitSubject {
     Worktree {
         repo: String,
     },
+    /// Whether the object exists in the repo and is a commit.
+    IsCommit {
+        repo: String,
+        oid: Oid,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +386,26 @@ impl GitObserver {
 
     /// Is `ancestor` an ancestor of (or equal to) `descendant`? `None` if
     /// git cannot tell (e.g. a missing object): unknown, never "no".
+    /// `Some(false)` if the object is absent or not a commit; `None` if
+    /// that cannot be established.
+    fn is_commit(&self, git_dir: &Path, oid: &Oid) -> Option<bool> {
+        let exists = self
+            .git(git_dir, &["cat-file", "-e", oid.as_str()], None)
+            .ok()?;
+        match exists.status.code() {
+            Some(0) => {}
+            Some(1) => return Some(false),
+            _ => return None,
+        }
+        let kind = self
+            .git(git_dir, &["cat-file", "-t", oid.as_str()], None)
+            .ok()?;
+        if !kind.status.success() {
+            return None;
+        }
+        Some(stdout_line(&kind).ok()? == "commit")
+    }
+
     fn descends(&self, git_dir: &Path, ancestor: &Oid, descendant: &Oid) -> Option<bool> {
         let out = self
             .git(
@@ -506,7 +531,8 @@ impl GitObserver {
             | GitSubject::Refs { repo }
             | GitSubject::Descends { repo, .. }
             | GitSubject::ContentManifest { repo, .. }
-            | GitSubject::Worktree { repo } => repo,
+            | GitSubject::Worktree { repo }
+            | GitSubject::IsCommit { repo, .. } => repo,
         };
         let Some(Ok(state)) = observation.repos.get(repo_name) else {
             return None;
@@ -543,6 +569,14 @@ impl GitObserver {
                 };
                 (value, "merge-base --is-ancestor".to_string())
             }
+            GitSubject::IsCommit { oid, .. } => (
+                if self.is_commit(&state.git_dir, oid)? {
+                    GitValue::Yes
+                } else {
+                    GitValue::No
+                },
+                "cat-file -e, cat-file -t".to_string(),
+            ),
             GitSubject::ContentManifest { commit, .. } => (
                 GitValue::Digest {
                     sha256: self.commit_manifest(&state.git_dir, commit)?,
