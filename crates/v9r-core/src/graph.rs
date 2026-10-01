@@ -53,6 +53,7 @@ use crate::runtime::{
     Concluded, DomainEvidence, DomainObligation, EffectDomain, MemoryJournal, Runtime,
     RuntimeFault, Stage,
 };
+use crate::verify::{Basis, Candidate, Inputs, Step, Verifier};
 
 // ------------------------------------------------------------ vocabulary
 
@@ -91,6 +92,8 @@ pub enum Term {
     /// A set-valued fact (e.g. every ref of a repository, every entry of
     /// a tree), name → value.
     Map(BTreeMap<String, String>),
+    /// Raw bytes, as observed (e.g. a file's content, a stored object).
+    Bytes(Vec<u8>),
     Absent,
 }
 
@@ -104,6 +107,11 @@ impl fmt::Debug for Term {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 map.hash(&mut hasher);
                 write!(f, "{{{} entries, #{:016x}}}", map.len(), hasher.finish())
+            }
+            Term::Bytes(bytes) => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                write!(f, "[{} bytes, #{:016x}]", bytes.len(), hasher.finish())
             }
             Term::Absent => f.write_str("absent"),
         }
@@ -322,6 +330,7 @@ struct Inner {
     discarded: Vec<Discarded>,
     lineage: BTreeMap<LineageId, Lineage>,
     kinds: BTreeMap<String, KindRules>,
+    verifiers: Vec<Arc<dyn Verifier>>,
 }
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -378,6 +387,12 @@ impl Registry {
             .observers = Some(observers.iter().map(|s| s.to_string()).collect());
     }
 
+    /// Add a trusted verifier. Facts of the kinds it derives are verified
+    /// only through it; providers' answers for them become claims.
+    pub fn add_verifier(&self, verifier: impl Verifier + 'static) {
+        self.inner().verifiers.push(Arc::new(verifier));
+    }
+
     pub fn plan<'a>(&self, keys: impl IntoIterator<Item = &'a Key>) -> Plan {
         let providers: Vec<_> = self.inner().providers.clone();
         Plan {
@@ -432,7 +447,147 @@ impl Registry {
 
     /// Like [`Registry::collect`], also returning the round id.
     pub fn collect_round(&self, keys: &[&Key]) -> (GraphEvidence, u64) {
+        self.collect_at(keys, 0)
+    }
+
+    fn collect_at(&self, keys: &[&Key], depth: usize) -> (GraphEvidence, u64) {
         let round = NEXT_ROUND.fetch_add(1, Ordering::Relaxed);
+        let verifiers = self.inner().verifiers.clone();
+        let derived: Vec<&Key> = keys
+            .iter()
+            .copied()
+            .filter(|k| verifiers.iter().any(|v| v.derives(k)))
+            .collect();
+        let mut claims = Vec::new();
+        let mut evidence = self.collect_providers(keys, &derived, round, &mut claims);
+        for key in derived {
+            for verifier in verifiers.iter().filter(|v| v.derives(key)) {
+                self.run_verifier(verifier.as_ref(), key, depth, &claims, &mut evidence);
+            }
+        }
+        (evidence, round)
+    }
+
+    /// Drive one verifier to a derivation of `key`.
+    fn run_verifier(
+        &self,
+        verifier: &dyn Verifier,
+        key: &Key,
+        depth: usize,
+        claims: &[(Key, String, Term)],
+        evidence: &mut GraphEvidence,
+    ) {
+        let me = format!("verifier:{}", verifier.id());
+        let log = |reason: String| {
+            self.inner().discarded.push(Discarded {
+                provider: me.clone(),
+                key: key.clone(),
+                reason,
+            })
+        };
+        let mut inputs = Inputs::new();
+        for _ in 0..1024 {
+            match verifier.step(key, &inputs) {
+                Step::Need(needed) => {
+                    let new: Vec<Key> = needed
+                        .into_iter()
+                        .filter(|k| !inputs.contains_key(k))
+                        .collect();
+                    if new.is_empty() || depth >= 8 {
+                        return log("incomplete: inputs unavailable".into());
+                    }
+                    let asked: Vec<&Key> = new.iter().collect();
+                    let (raw, _) = self.collect_at(&asked, depth + 1);
+                    for k in new {
+                        let candidates = raw
+                            .get(&k)
+                            .iter()
+                            .filter_map(|e| match e {
+                                Evidence::Verified { value, provenance } => Some(Candidate {
+                                    value: value.clone(),
+                                    vouched_by: Some(provenance.observer.clone()),
+                                }),
+                                Evidence::Proposed { value, .. } => Some(Candidate {
+                                    value: value.clone(),
+                                    vouched_by: None,
+                                }),
+                                Evidence::Semantic { .. } => None,
+                            })
+                            .collect();
+                        inputs.insert(k, candidates);
+                    }
+                }
+                Step::Incomplete(reason) => return log(format!("incomplete: {reason}")),
+                Step::Derived { value, basis } => {
+                    for (_, provider, claimed) in claims.iter().filter(|(k, _, _)| k == key) {
+                        if *claimed != value {
+                            self.inner().discarded.push(Discarded {
+                                provider: provider.clone(),
+                                key: key.clone(),
+                                reason: format!(
+                                    "derivation mismatch: claimed {claimed:?}, {me} derived {value:?}"
+                                ),
+                            });
+                        }
+                    }
+                    let fact = Fact {
+                        subject: key.clone(),
+                        value,
+                    };
+                    let unvouched = basis
+                        .iter()
+                        .filter(|b| matches!(b, Basis::Unvouched(_)))
+                        .count();
+                    if unvouched > 0 {
+                        evidence.add_proposed(Proposed {
+                            value: fact,
+                            source: format!("{me} over {unvouched} unvouched input(s)"),
+                        });
+                        return;
+                    }
+                    let mut observers: Vec<&str> = basis
+                        .iter()
+                        .filter_map(|b| match b {
+                            Basis::VouchedBy(_, by) => Some(by.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    observers.sort();
+                    observers.dedup();
+                    let certified = basis
+                        .iter()
+                        .filter(|b| matches!(b, Basis::SelfCertified(_)))
+                        .count();
+                    evidence.add_verified(
+                        Verified::attest(fact),
+                        Provenance {
+                            observer: me.clone(),
+                            basis: format!(
+                                "{certified} self-certified input(s); trusts {}",
+                                if observers.is_empty() {
+                                    "no observer".to_string()
+                                } else {
+                                    observers.join(", ")
+                                }
+                            ),
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+        log("incomplete: derivation did not converge".into());
+    }
+
+    /// Ask providers. Their answers for `derived` kinds are kept as
+    /// claims (and returned in `claims` for comparison).
+    fn collect_providers(
+        &self,
+        keys: &[&Key],
+        derived: &[&Key],
+        round: u64,
+        claims: &mut Vec<(Key, String, Term)>,
+    ) -> GraphEvidence {
         // Never call providers under the lock.
         let (providers, kinds) = {
             let inner = self.inner();
@@ -532,6 +687,7 @@ impl Registry {
                     continue;
                 }
                 let supporting = !asked.contains(&&key);
+                let is_derived = derived.contains(&&key);
                 lineage.push(Lineage {
                     id: lid,
                     value: attested.fact().value.clone(),
@@ -548,7 +704,21 @@ impl Registry {
                 if supporting {
                     continue;
                 }
-                if trust == Trust::ClaimsOnly {
+                if is_derived {
+                    let fact = attested.fact.into_inner();
+                    claims.push((
+                        fact.subject.clone(),
+                        format!("provider:{id}"),
+                        fact.value.clone(),
+                    ));
+                    evidence.add_proposed(Proposed {
+                        value: fact,
+                        source: format!(
+                            "provider:{id} (derived kind: a claim) {}",
+                            lineage_token(lid)
+                        ),
+                    });
+                } else if trust == Trust::ClaimsOnly {
                     evidence.add_proposed(Proposed {
                         value: attested.fact.into_inner(),
                         source: format!("provider:{id} (claims only) {}", lineage_token(lid)),
@@ -567,7 +737,7 @@ impl Registry {
         let mut inner = self.inner();
         inner.discarded.extend(discarded);
         inner.lineage.extend(lineage.into_iter().map(|l| (l.id, l)));
-        (evidence, round)
+        evidence
     }
 }
 
@@ -769,7 +939,8 @@ mod tests {
             imports.iter().all(|line| line.contains("std::")
                 || line.contains("serde::")
                 || line.contains("crate::kernel::")
-                || line.contains("crate::runtime::")),
+                || line.contains("crate::runtime::")
+                || line.contains("crate::verify::")),
             "{imports:?}"
         );
         let code: String = source
