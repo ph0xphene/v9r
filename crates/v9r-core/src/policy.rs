@@ -8,7 +8,6 @@
 //! | `I1.observed_writes_declared` | observed changes stay inside the declared writes | post | `Within` (unknown effects are unknown subtrees) |
 //! | `I3.rollback_restores_checkpoint` | rollback ends in the checkpointed version | post | hard `Workspace = Digest(checkpoint)` |
 //! | `I4.trusted_state_intact` | trace and checkpoints unchanged by anyone but the runtime | pre + post | hard `TrustedState = Intact` |
-//! | `workspace_accepted` | no action on top of an unaccepted transition | pre | hard `Transitions = Accepted` |
 //! | `step_budget` | `max_steps` | pre | `AtMost` |
 //! | `well_formed_proposal` | expectation paths are workspace names | pre | `AtMost` (0 malformed) |
 //! | `export_gate` | export only a version whose configured tests passed, with mandatory artifacts present | pre | hard `TestsAt(version) = Passed`, `Exists(a) = Present` |
@@ -18,6 +17,9 @@
 //! are not policy entries: I2 is structural (only attested evidence can
 //! be verified, records ingest as proposed, every verified entry carries
 //! provenance) and I5 is the kernel's `Strength::Hard` semantics.
+//!
+//! "No action on top of an unaccepted transition" is not listed: it is a
+//! lifecycle rule, owned by `crate::runtime` (`transitions_accepted`).
 //!
 //! A proposal can only *add* obligations (expectations). It cannot name,
 //! remove or weaken an invariant; the policy is fixed when the guarded
@@ -91,7 +93,6 @@ pub enum RuntimeInvariant {
     ObservedWritesDeclared,
     RollbackRestoresCheckpoint,
     TrustedStateIntact,
-    WorkspaceAccepted,
     StepBudget,
     WellFormedProposal,
     ExportGate,
@@ -99,9 +100,8 @@ pub enum RuntimeInvariant {
 }
 
 impl RuntimeInvariant {
-    pub const ALL: [RuntimeInvariant; 9] = [
+    pub const ALL: [RuntimeInvariant; 8] = [
         RuntimeInvariant::WellFormedProposal,
-        RuntimeInvariant::WorkspaceAccepted,
         RuntimeInvariant::TrustedStateIntact,
         RuntimeInvariant::StepBudget,
         RuntimeInvariant::DeclaredWritesInScope,
@@ -162,7 +162,6 @@ impl Invariant<Context<'_>, Subject, Value> for RuntimeInvariant {
             RuntimeInvariant::ObservedWritesDeclared => "I1.observed_writes_declared",
             RuntimeInvariant::RollbackRestoresCheckpoint => "I3.rollback_restores_checkpoint",
             RuntimeInvariant::TrustedStateIntact => "I4.trusted_state_intact",
-            RuntimeInvariant::WorkspaceAccepted => "workspace_accepted",
             RuntimeInvariant::StepBudget => "step_budget",
             RuntimeInvariant::WellFormedProposal => "well_formed_proposal",
             RuntimeInvariant::ExportGate => "export_gate",
@@ -187,9 +186,6 @@ impl Invariant<Context<'_>, Subject, Value> for RuntimeInvariant {
                     value: malformed as u64,
                     limit: 0,
                 })
-            }
-            (I::WorkspaceAccepted, S::Pre { .. }) => {
-                pre(hard(Subject::Transitions, Value::Accepted))
             }
             (I::TrustedStateIntact, S::Pre { .. }) => {
                 pre(hard(Subject::TrustedState, Value::Intact))

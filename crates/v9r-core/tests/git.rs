@@ -487,12 +487,24 @@ async fn graft_file_does_not_forge_ancestry() {
     )
     .await;
     let head = release_head(&guard).await;
-    // A plain file write (no ref moves), which git itself honours.
-    fs::write(
-        env.work.join("grafts"),
-        format!("{} {}\n", head.as_str(), env.approved_base.as_str()),
+    // A plain file write (no ref moves), which git itself honours. It is
+    // written by a mediated command: an out-of-band write between steps
+    // would be drift, and the next step would be refused.
+    let graft = format!("--format=%H {}", env.approved_base.as_str());
+    ok(
+        &mut guard,
+        &[
+            "git",
+            "--git-dir=repo/.git",
+            "show",
+            "-s",
+            &graft,
+            "--output=grafts",
+            head.as_str(),
+        ],
+        &[],
     )
-    .unwrap();
+    .await;
     ok(&mut guard, &["cp", "grafts", "repo/.git/info/grafts"], &[]).await;
     let honoured = Command::new("git")
         .args([

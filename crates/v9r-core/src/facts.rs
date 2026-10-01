@@ -11,7 +11,6 @@
 //! | `Workspace` | live observation, or a live receipt's post-state digest | that digest |
 //! | `TestsAt(v)` | the runtime's own wait status of a configured test command started on workspace version `v` | `v` |
 //! | `TrustedState` | trace seal + checkpoint seals | seal check |
-//! | `Transitions` | the runtime's own record of post-execution verdicts | task |
 //!
 //! Anything read back from disk (a `ReceiptRecord` in a trace or bundle)
 //! enters only as `Proposed`.
@@ -39,8 +38,6 @@ pub enum Subject {
     TestsAt(ContentHash),
     /// Integrity of the task's trusted runtime state.
     TrustedState,
-    /// Whether every workspace transition so far was accepted.
-    Transitions,
     /// Content manifest (`crate::content`) of a workspace directory.
     ContentManifest(String),
 }
@@ -59,8 +56,6 @@ pub enum Value {
     Failed { code: Option<i32> },
     Intact,
     Tampered { reason: String },
-    Accepted,
-    Unaccepted { reason: String },
 }
 
 pub type RuntimeFact = Fact<Subject, Value>;
@@ -201,20 +196,6 @@ pub(crate) async fn trusted_state(
             basis: "trace seal and checkpoint seals".to_string(),
         },
     ))
-}
-
-pub(crate) fn transitions(accepted: Result<(), String>) -> (Verified<RuntimeFact>, Provenance) {
-    let value = match accepted {
-        Ok(()) => Value::Accepted,
-        Err(reason) => Value::Unaccepted { reason },
-    };
-    (
-        verified(Subject::Transitions, value),
-        Provenance {
-            observer: "runtime-verdicts".to_string(),
-            basis: "post-execution decisions of this task".to_string(),
-        },
-    )
 }
 
 /// Ingest a persisted receipt. Whatever it calls verified becomes a

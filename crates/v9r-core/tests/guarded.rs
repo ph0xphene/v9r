@@ -195,7 +195,7 @@ async fn undeclared_observed_write_is_denied_and_held_until_rollback() {
     let result = guard.authorize(command(&["true"], &[])).await.unwrap();
     assert_eq!(result.verdict(), Verdict::Deny);
     assert!(matches!(
-        finding(result.decision(), "workspace_accepted"),
+        finding(result.decision(), v9r_core::runtime::ACCEPTED),
         Status::Violated(_)
     ));
 
