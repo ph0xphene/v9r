@@ -13,6 +13,7 @@ pub mod guarded;
 pub mod kernel;
 pub mod manifest;
 pub mod policy;
+pub mod runtime;
 pub mod state;
 pub mod task;
 pub mod trace;

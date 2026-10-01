@@ -331,30 +331,32 @@ pub async fn rollback_observed(
     };
     let pre = capture(workdir.clone()).await??;
     let result = rollback(task_id, checkpoint, trace).await;
-    let outcome = match &result {
-        Ok(()) => ExecutionOutcome::Completed,
-        Err(err) => ExecutionOutcome::Failed {
-            reason: err.to_string(),
-        },
-    };
+    let outcome = rollback_outcome(&result);
     let post = match capture(workdir).await {
         Ok(Ok(post)) => Ok(post),
         Ok(Err(err)) => Err(err.to_string()),
         Err(err) => Err(err.to_string()),
     };
-    let receipt = EffectReceipt::from_observations(
+    let receipt = crate::execution::record_effect(
         Action::Rollback { checkpoint },
         None,
         outcome,
         &pre,
         post.as_ref().map_err(Clone::clone),
-    );
-    trace
-        .log_event(TaskEvent::EffectObserved {
-            receipt: Box::new(receipt.to_record()),
-        })
-        .await?;
+        trace,
+    )
+    .await?;
     Ok(ObservedRollback { result, receipt })
+}
+
+/// What the runtime saw of a rollback's execution.
+pub(crate) fn rollback_outcome(result: &Result<()>) -> ExecutionOutcome {
+    match result {
+        Ok(()) => ExecutionOutcome::Completed,
+        Err(err) => ExecutionOutcome::Failed {
+            reason: err.to_string(),
+        },
+    }
 }
 
 fn checkpoint_untraced(task_id: Uuid) -> Result<(CheckpointId, PathBuf, FsState)> {

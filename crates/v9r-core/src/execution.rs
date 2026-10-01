@@ -8,7 +8,7 @@ use crate::effect::{Action, EffectReceipt, ExecutionOutcome, Observation};
 use crate::manifest::{normalize_path, AccessType};
 use crate::state::ObserveError;
 use crate::task::{Task, TaskStatus};
-use crate::trace::{TaskEvent, TraceLogger};
+use crate::trace::{TaskEvent, TraceError, TraceLogger};
 use crate::vfs;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +160,27 @@ pub(crate) async fn run_observed_from(
     pre: &Observation,
 ) -> Result<(ObservedStep, Option<Observation>)> {
     let root = pre.root().to_path_buf();
+    let (action, outcome, result) = run_command(task, command, trace).await;
+    let post = observe_blocking(root).await;
+    let receipt = record_effect(
+        action,
+        requested,
+        outcome,
+        pre,
+        post.as_ref().map_err(ToString::to_string),
+        trace,
+    )
+    .await?;
+    Ok((ObservedStep { result, receipt }, post.ok()))
+}
+
+/// Run `command` like [`run_task_step`] and classify what the runtime
+/// itself saw of its execution. Observing the result is the caller's job.
+pub(crate) async fn run_command(
+    task: &mut Task,
+    command: CommandSpec,
+    trace: &TraceLogger,
+) -> (Action, ExecutionOutcome, Result<StepOutput>) {
     let action = Action::Command {
         argv: std::iter::once(command.program.clone())
             .chain(command.args.iter().cloned())
@@ -186,21 +207,26 @@ pub(crate) async fn run_observed_from(
             reason: err.to_string(),
         },
     };
+    (action, outcome, result)
+}
 
-    let post = observe_blocking(root).await;
-    let receipt = EffectReceipt::from_observations(
-        action,
-        requested,
-        outcome,
-        pre,
-        post.as_ref().map_err(ToString::to_string),
-    );
+/// Build the receipt for an effect from its bracketing observations and
+/// log it as a `TaskEvent::EffectObserved`.
+pub(crate) async fn record_effect(
+    action: Action,
+    requested: Option<String>,
+    outcome: ExecutionOutcome,
+    pre: &Observation,
+    post: std::result::Result<&Observation, String>,
+    trace: &TraceLogger,
+) -> std::result::Result<EffectReceipt, TraceError> {
+    let receipt = EffectReceipt::from_observations(action, requested, outcome, pre, post);
     trace
         .log_event(TaskEvent::EffectObserved {
             receipt: Box::new(receipt.to_record()),
         })
         .await?;
-    Ok((ObservedStep { result, receipt }, post.ok()))
+    Ok(receipt)
 }
 
 pub(crate) async fn observe_blocking(root: PathBuf) -> Result<Observation> {

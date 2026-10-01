@@ -237,6 +237,18 @@ impl TraceLogger {
     }
 }
 
+/// The sealed task trace is the runtime's journal on the guarded paths.
+impl crate::runtime::Journal for TraceLogger {
+    type Error = TraceError;
+
+    async fn record(&self, record: DecisionRecord) -> Result<()> {
+        self.log_event(TaskEvent::InvariantDecision {
+            record: Box::new(record),
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
