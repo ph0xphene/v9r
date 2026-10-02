@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::kernel::{
     evaluate, Decision, DecisionRecord, EvidenceBase, Fact, Obligation, Phase, Proposed,
-    Provenance, Requirement, Semantic, Status, Strength, Verdict, Verified,
+    Provenance, Requirement, Status, Strength, Verdict, Verified,
 };
 
 // ------------------------------------------------------------ vocabulary
@@ -363,7 +363,7 @@ pub struct Runtime<D: EffectDomain, J: Journal> {
     journal: J,
     /// The last observation the runtime accepted.
     trusted: D::Observation,
-    /// Durable domain evidence (effect-established, semantic, proposed).
+    /// Durable domain evidence (effect-established, proposed).
     durable: DomainEvidence<D>,
     unaccepted: Option<String>,
 }
@@ -402,11 +402,6 @@ where
 
     pub fn is_accepting(&self) -> bool {
         self.unaccepted.is_none()
-    }
-
-    /// Record semantic evidence. It can satisfy only `Soft` obligations.
-    pub fn add_semantic(&mut self, fact: Semantic<DomainFact<D>>) {
-        self.durable.add_semantic(fact);
     }
 
     /// Record a claim. Informational only.

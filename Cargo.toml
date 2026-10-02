@@ -2,10 +2,6 @@
 resolver = "2"
 members = [
     "crates/v9r-core",
-    "crates/v9r-vfs",
-    "crates/v9r-cap",
-    "crates/v9r-runtime",
-    "crates/v9r-orchestrator",
 ]
 
 [workspace.package]
@@ -16,28 +12,11 @@ authors = ["v9r contributors"]
 
 [workspace.dependencies]
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "io-util", "io-std", "time", "fs", "process"] }
-async-trait = "0.1"
-bytes = "1.7"
-slotmap = "1.0"
-thiserror = "1.0"
-anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-toml = "0.8"
-tracing = "0.1"
-wasmtime = "26"
-wasmtime-wasi = "26"
-wat = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 libc = "0.2"
-
-v9r-core = { path = "crates/v9r-core" }
-v9r-vfs = { path = "crates/v9r-vfs" }
-v9r-cap = { path = "crates/v9r-cap" }
-v9r-runtime = { path = "crates/v9r-runtime" }
-v9r-orchestrator = { path = "crates/v9r-orchestrator" }
 
 [profile.dev]
 opt-level = 0

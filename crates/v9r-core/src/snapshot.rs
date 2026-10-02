@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 use crate::graph::{Answer, Attestor, EvidenceProvider, Key, Term};
 use crate::verifiers::{digest_of, hex, observed, walk_tree, Walk, MANIFEST};
-use crate::verify::{vouched, Basis, Candidate, Inputs, Step, Verifier};
+use crate::verify::{vouched, Basis, Inputs, Step, Verifier};
 
 /// Definition under which two snapshots are the same iff their root ids
 /// are: names, content and git file modes all count.
@@ -112,48 +112,6 @@ impl ObjectStore {
     }
 }
 
-/// Snapshot `dir` from a transcription made elsewhere (for example by the
-/// probe inside a world): the same derivation as `snapshot(dir)`, with
-/// every primitive observation taken from `transcript`. An observation
-/// the transcript lacks leaves the snapshot incomplete.
-pub fn snapshot_from(
-    store: &ObjectStore,
-    transcript: &BTreeMap<Key, Term>,
-    dir: &str,
-    vouched_by: &str,
-) -> Result<String, String> {
-    let verifier = FsSnapshot::new(store.clone());
-    let key = Key::new("snapshot", [dir]);
-    let mut inputs = Inputs::new();
-    for _ in 0..100_000 {
-        match verifier.step(&key, &inputs) {
-            Step::Derived {
-                value: Term::Id(root),
-                ..
-            } => return Ok(root),
-            Step::Derived { value, .. } => return Err(format!("unexpected {value:?}")),
-            Step::Incomplete(reason) => return Err(reason),
-            Step::Need(keys) => {
-                for k in keys {
-                    let candidates = transcript
-                        .get(&k)
-                        .map(|v| {
-                            vec![Candidate {
-                                value: v.clone(),
-                                vouched_by: Some(vouched_by.to_string()),
-                            }]
-                        })
-                        .unwrap_or_default();
-                    if inputs.insert(k.clone(), candidates).is_some() {
-                        return Err(format!("{k:?} asked twice"));
-                    }
-                }
-            }
-        }
-    }
-    Err("snapshot did not converge".into())
-}
-
 /// A snapshot tree loaded from a store, every object already checked.
 enum Node {
     Tree(Vec<(String, Node)>),
@@ -228,56 +186,6 @@ fn write_out(node: &Node, dest: &std::path::Path) -> Result<(), String> {
         Node::Link(target) => std::os::unix::fs::symlink(target, dest).map_err(err)?,
     }
     Ok(())
-}
-
-/// One entry of a snapshot, relative to its root, parents before
-/// children.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SnapEntry {
-    Dir(String),
-    File {
-        path: String,
-        executable: bool,
-        bytes: Vec<u8>,
-    },
-    Link {
-        path: String,
-        target: String,
-    },
-}
-
-/// Every entry of snapshot `root`, each object checked against its id
-/// before any entry is returned.
-pub fn entries(store: &ObjectStore, root: &str) -> Result<Vec<SnapEntry>, String> {
-    fn flatten(node: &Node, prefix: &str, out: &mut Vec<SnapEntry>) {
-        let Node::Tree(children) = node else { return };
-        for (name, child) in children {
-            let path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            match child {
-                Node::Tree(_) => {
-                    out.push(SnapEntry::Dir(path.clone()));
-                    flatten(child, &path, out);
-                }
-                Node::File { executable, bytes } => out.push(SnapEntry::File {
-                    path,
-                    executable: *executable,
-                    bytes: bytes.clone(),
-                }),
-                Node::Link(target) => out.push(SnapEntry::Link {
-                    path,
-                    target: target.clone(),
-                }),
-            }
-        }
-    }
-    let tree = load(store, root, 0)?;
-    let mut out = Vec::new();
-    flatten(&tree, "", &mut out);
-    Ok(out)
 }
 
 /// Write the snapshot `root` out of `store` under `dest` (which must not
