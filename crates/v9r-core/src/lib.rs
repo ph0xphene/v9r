@@ -1,10 +1,13 @@
 //! v9r-core: shared types for the v9r workspace.
 
 pub mod adapter;
+pub mod authority;
 pub mod bundle;
+pub mod capability;
 pub mod content;
 pub mod context;
 pub mod counter;
+pub mod delegation;
 pub mod effect;
 pub mod execution;
 pub mod facts;
@@ -18,6 +21,7 @@ pub mod graph;
 pub mod guarded;
 pub mod kernel;
 pub mod manifest;
+pub mod object_identity;
 pub mod policy;
 pub mod provenance;
 pub mod runtime;

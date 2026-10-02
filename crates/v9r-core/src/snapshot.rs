@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 use crate::graph::{Answer, Attestor, EvidenceProvider, Key, Term};
 use crate::verifiers::{digest_of, hex, observed, walk_tree, Walk, MANIFEST};
-use crate::verify::{vouched, Basis, Inputs, Step, Verifier};
+use crate::verify::{vouched, Basis, Candidate, Inputs, Step, Verifier};
 
 /// Definition under which two snapshots are the same iff their root ids
 /// are: names, content and git file modes all count.
@@ -87,6 +87,205 @@ impl ObjectStore {
     pub fn ids(&self) -> Vec<String> {
         self.0.lock().expect("store").keys().cloned().collect()
     }
+
+    /// An object's type and body, if stored *and* its bytes hash to `id`.
+    pub fn get_verified(&self, id: &str) -> Result<(String, Vec<u8>), String> {
+        let stored = self
+            .0
+            .lock()
+            .expect("store")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("object {id} not stored"))?;
+        if hex(&Sha256::digest(&stored)) != id {
+            return Err(format!("object {id}: stored bytes do not hash to it"));
+        }
+        let nul = stored
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| format!("object {id}: no header"))?;
+        let header = std::str::from_utf8(&stored[..nul]).map_err(|e| e.to_string())?;
+        let (kind, _) = header
+            .split_once(' ')
+            .ok_or_else(|| format!("object {id}: bad header"))?;
+        Ok((kind.to_string(), stored[nul + 1..].to_vec()))
+    }
+}
+
+/// Snapshot `dir` from a transcription made elsewhere (for example by the
+/// probe inside a world): the same derivation as `snapshot(dir)`, with
+/// every primitive observation taken from `transcript`. An observation
+/// the transcript lacks leaves the snapshot incomplete.
+pub fn snapshot_from(
+    store: &ObjectStore,
+    transcript: &BTreeMap<Key, Term>,
+    dir: &str,
+    vouched_by: &str,
+) -> Result<String, String> {
+    let verifier = FsSnapshot::new(store.clone());
+    let key = Key::new("snapshot", [dir]);
+    let mut inputs = Inputs::new();
+    for _ in 0..100_000 {
+        match verifier.step(&key, &inputs) {
+            Step::Derived {
+                value: Term::Id(root),
+                ..
+            } => return Ok(root),
+            Step::Derived { value, .. } => return Err(format!("unexpected {value:?}")),
+            Step::Incomplete(reason) => return Err(reason),
+            Step::Need(keys) => {
+                for k in keys {
+                    let candidates = transcript
+                        .get(&k)
+                        .map(|v| {
+                            vec![Candidate {
+                                value: v.clone(),
+                                vouched_by: Some(vouched_by.to_string()),
+                            }]
+                        })
+                        .unwrap_or_default();
+                    if inputs.insert(k.clone(), candidates).is_some() {
+                        return Err(format!("{k:?} asked twice"));
+                    }
+                }
+            }
+        }
+    }
+    Err("snapshot did not converge".into())
+}
+
+/// A snapshot tree loaded from a store, every object already checked.
+enum Node {
+    Tree(Vec<(String, Node)>),
+    File { executable: bool, bytes: Vec<u8> },
+    Link(String),
+}
+
+fn load(store: &ObjectStore, id: &str, depth: usize) -> Result<Node, String> {
+    if depth > 256 {
+        return Err("tree too deep".into());
+    }
+    let (kind, body) = store.get_verified(id)?;
+    if kind != "tree" {
+        return Err(format!("{id} is a {kind}, not a tree"));
+    }
+    let mut out = Vec::new();
+    let mut rest = &body[..];
+    while !rest.is_empty() {
+        let sp = rest
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or("bad tree entry")?;
+        let nul = rest.iter().position(|&b| b == 0).ok_or("bad tree entry")?;
+        if nul < sp || rest.len() < nul + 33 {
+            return Err("bad tree entry".into());
+        }
+        let mode = std::str::from_utf8(&rest[..sp]).map_err(|e| e.to_string())?;
+        let name = std::str::from_utf8(&rest[sp + 1..nul]).map_err(|e| e.to_string())?;
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(format!("unsafe entry name {name:?}"));
+        }
+        let child = hex(&rest[nul + 1..nul + 33]);
+        let node = match mode {
+            "40000" => load(store, &child, depth + 1)?,
+            "100644" | "100755" | "120000" => {
+                let (kind, bytes) = store.get_verified(&child)?;
+                if kind != "blob" {
+                    return Err(format!("{name}: {kind}, expected blob"));
+                }
+                if mode == "120000" {
+                    Node::Link(String::from_utf8(bytes).map_err(|e| e.to_string())?)
+                } else {
+                    Node::File {
+                        executable: mode == "100755",
+                        bytes,
+                    }
+                }
+            }
+            other => return Err(format!("{name}: mode {other}")),
+        };
+        out.push((name.to_string(), node));
+        rest = &rest[nul + 33..];
+    }
+    Ok(Node::Tree(out))
+}
+
+fn write_out(node: &Node, dest: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let err = |e: std::io::Error| format!("{dest:?}: {e}");
+    match node {
+        Node::Tree(entries) => {
+            std::fs::create_dir(dest).map_err(err)?;
+            for (name, child) in entries {
+                write_out(child, &dest.join(name))?;
+            }
+        }
+        Node::File { executable, bytes } => {
+            std::fs::write(dest, bytes).map_err(err)?;
+            let mode = if *executable { 0o555 } else { 0o444 };
+            std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode)).map_err(err)?;
+        }
+        Node::Link(target) => std::os::unix::fs::symlink(target, dest).map_err(err)?,
+    }
+    Ok(())
+}
+
+/// One entry of a snapshot, relative to its root, parents before
+/// children.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapEntry {
+    Dir(String),
+    File {
+        path: String,
+        executable: bool,
+        bytes: Vec<u8>,
+    },
+    Link {
+        path: String,
+        target: String,
+    },
+}
+
+/// Every entry of snapshot `root`, each object checked against its id
+/// before any entry is returned.
+pub fn entries(store: &ObjectStore, root: &str) -> Result<Vec<SnapEntry>, String> {
+    fn flatten(node: &Node, prefix: &str, out: &mut Vec<SnapEntry>) {
+        let Node::Tree(children) = node else { return };
+        for (name, child) in children {
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            match child {
+                Node::Tree(_) => {
+                    out.push(SnapEntry::Dir(path.clone()));
+                    flatten(child, &path, out);
+                }
+                Node::File { executable, bytes } => out.push(SnapEntry::File {
+                    path,
+                    executable: *executable,
+                    bytes: bytes.clone(),
+                }),
+                Node::Link(target) => out.push(SnapEntry::Link {
+                    path,
+                    target: target.clone(),
+                }),
+            }
+        }
+    }
+    let tree = load(store, root, 0)?;
+    let mut out = Vec::new();
+    flatten(&tree, "", &mut out);
+    Ok(out)
+}
+
+/// Write the snapshot `root` out of `store` under `dest` (which must not
+/// exist), with git's modes. The whole tree is loaded and every object
+/// checked against its id first: a snapshot that fails writes nothing.
+pub fn materialize(store: &ObjectStore, root: &str, dest: &std::path::Path) -> Result<(), String> {
+    let tree = load(store, root, 0)?;
+    write_out(&tree, dest)
 }
 
 impl EvidenceProvider for ObjectStore {
