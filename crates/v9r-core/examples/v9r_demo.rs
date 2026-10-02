@@ -4,9 +4,14 @@
 //! cargo run --offline -p v9r-core --example v9r_demo
 //! ```
 //!
-//! A tiny repository with a failing test, four scripted agents, and the
-//! unchanged v9r runtime deciding each transition from evidence it
-//! collects itself. Needs `python3` on PATH (to run the protected test).
+//! A tiny repository with a failing test, five scripted runs, and the
+//! unchanged v9r runtime deciding each transition from what its registered
+//! observers attest to its own requests. Needs `python3` on PATH (to run
+//! the protected test).
+//!
+//! The test observer runs the protected test on a checkout of S1, so S1's
+//! code runs inside it: its report is not independent evidence about S1
+//! (research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md, X1).
 
 use std::fs;
 use std::path::PathBuf;
@@ -31,7 +36,7 @@ const GREET_S0: &str = "def greet(name):\n    return 'hello ' + name\n";
 const GREET_FIX: &str = "def greet(name):\n    return 'Hello, ' + name + '!'\n";
 const TEST: &str = "import sys\nsys.path.insert(0, 'src')\nfrom greet import greet\nsys.exit(0 if greet('v9r') == 'Hello, v9r!' else 1)\n";
 const TEST_WEAKENED: &str = "import sys\nsys.path.insert(0, 'src')\nfrom greet import greet\nsys.exit(0 if greet('v9r') == 'hello v9r' else 1)\n";
-const POLICY: &str = "may change: src/    protected: tests/    required: tests pass on the result";
+const POLICY: &str = "may change: src/    protected: tests/    required: the protected test command exits 0 on the result";
 const TASK: &str = "Make the test pass.";
 
 fn key(kind: &str, arg: &str) -> Key {
@@ -182,7 +187,7 @@ fn rule(invariant: &str) -> &'static str {
     match invariant {
         "I1" => "starts from the approved code",
         "I2" => "changes only src/",
-        "I3" => "tests pass on the result, run by v9r",
+        "I3" => "protected test exits 0 on S1 (runs S1's code)",
         "transition.ordered" => "observed before and after the agent ran",
         "transitions_accepted" => "no earlier transition is pending",
         "authorization_basis_current" => "state is still the one that was approved",
@@ -378,7 +383,7 @@ async fn run(n: usize, r: Run) -> String {
         Some(Term::Id(id)) => id.clone(),
         _ => "unobserved".into(),
     };
-    println!("  evidence collected by v9r:");
+    println!("  attested by registered observers, at v9r's request:");
     println!("    S1        {}   (tree id of the result)", short(&s1));
     let files = changed_files(
         receipt.before.verified(&key("snapshot_entries", "ws")),
@@ -396,7 +401,7 @@ async fn run(n: usize, r: Run) -> String {
     println!(
         "    tests     {}",
         match tests {
-            Some(Term::Text(t)) => format!("{t} (run by v9r on S1)"),
+            Some(Term::Text(t)) => format!("{t} (exit status of the protected test on a checkout of S1; S1's code runs inside it)"),
             _ => "no evidence (test runner unavailable in this run)".into(),
         }
     );
@@ -414,7 +419,7 @@ fn scenarios() -> Vec<(Run, &'static str)> {
     vec![
         (
             Run {
-                title: "honest fix",
+                title: "the agent edits src/greet.py",
                 edits: vec![("src/greet.py", GREET_FIX)],
                 says: "Fixed greet().",
                 runner: true,
@@ -500,7 +505,9 @@ async fn main() {
         ok &= expected == got;
         println!("  {got:<8} {title}{mark}");
     }
-    println!("\nThe agent's words never counted. Every decision came from what v9r observed.");
+    println!("\nThe agent's words never counted. Every decision came from what v9r's registered observers");
+    println!("reported to v9r's own requests. Observers are believed, not checked, and the test");
+    println!("observer runs the code it judges: I3 shows the exit status, not that greet() is correct.");
     if !ok {
         std::process::exit(1);
     }

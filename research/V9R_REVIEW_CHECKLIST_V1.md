@@ -7,14 +7,22 @@ Expected values were measured on 2026-10-02.*
 
 ## The invariant this checklist relies on
 
-> **The demo and the State vs Causality test are enough to understand
-> the central claim.**
+> **The demo, the State vs Causality test and the Self-Referential
+> Observers test are enough to understand the central claim and its
+> boundary.**
+>
+> *(Corrected for `v9r-review-v1.1`: the demo and State vs Causality
+> alone do not show that the demo's test rule is controlled by the code
+> it judges, or that the decision covers S1 only as captured. X1 and X4
+> show both. V9R_RELEASE_AUDIT_V0, H9–H10.)*
 
 The two artifacts split the claim between them:
 
 | Part of the claim | Demo shows it | State vs Causality shows it |
 |---|---|---|
-| a transition is accepted only on verified evidence that satisfies the rules | run 1 (ALLOW): every rule satisfied, each fact named with its observer | World A: 6 findings satisfied |
+| a transition is accepted only if registered observers' attestations, given to v9r's own requests, satisfy the rules | run 1 (ALLOW): every rule satisfied, each fact named with its observer | World A: 6 findings satisfied |
+| an attestation is as true as its observer; an observer that runs S1 is controlled by S1 | — (run 1's I3 is such an observer) | — ; `self_referential_observers` X1: Allow with `greet` absent |
+| the decision covers S1 as captured when the actor's call returns | — | — ; `self_referential_observers` X4: stale S1 accepted 40/40 |
 | rules bind the result, not the agent's account | run 2 (tests pass, but the test was edited → DENY); run 3 (claim only → BLOCKED); run 4 (claim, tests fail → DENY) | — |
 | authorization is fresh and single-use | run 5 (state changed after approval → REFUSED, runtime holds) | PRE re-checked on a fresh snapshot (`@current`) |
 | **states, not histories** | — | World B: an unauthorized writer of identical bytes gets **identical** complete decisions; World C (different bytes) does not |
@@ -26,19 +34,20 @@ Everything else is supporting evidence:
 - `content_addressed` (identity);
 - `kernel_guard`.
 
-If reading the demo and `state_vs_causality.rs` leaves the claim
+If reading the demo, `state_vs_causality.rs` and
+`self_referential_observers.rs` leaves the claim
 unclear, the claim is badly stated. Report that as a finding.
 
 ## Before you start
 
 ```sh
-git checkout v9r-review-v1        # once tagged; until then the release-candidate tree
+git checkout v9r-review-v1.1      # once tagged; until then the release-candidate tree
 cargo fetch                       # once, with network; afterwards everything runs --offline
 ```
 
 You need:
 
-- Rust 1.98;
+- Rust 1.98 (measured with rustc 1.98.1, cargo 1.98.0);
 - `python3` (the demo's test runner);
 - `git` (one identity test).
 
@@ -129,6 +138,8 @@ demonstrate them still pass:
 | "a PRE fact may name the snapshot it was derived on" | PRE is re-checked on a fresh snapshot; it must name `@current` | STATE_VS_CAUSALITY_V0, failed assumption 1 |
 | "lineage or snapshot ids distinguish who wrote a state" | they are counters | STATE_VS_CAUSALITY_V0, failed assumption 2 |
 | "scope entries without modes are enough" | `chmod +x` outside the scope was allowed by the old source | `scope_entries` header (Debloat Phase 1) |
+| "a test run by v9r on S1 is independent evidence about S1" | S1's code decides the test's exit status: false ALLOW, `greet` absent | `self_referential_observers::x1_judged_program_decides_the_test_runners_report` |
+| "the accepted S1 is the state when the transition completes" | a write after the after-snapshot, during the decision, is not judged: 40/40 | `self_referential_observers::x4_watched_state_changes_after_observation_before_completion` |
 
 **Look for:** assumptions we still make without knowing they are false.
 External Review §8 lists ten questions.

@@ -2,8 +2,36 @@
 
 *For a skeptical systems engineer who has only the repository,
 README_REVIEWER.md and this document. Every number here was measured
-on 2026-10-02 on one Linux host, with Rust 1.98.0. Re-measure it with
-§5; do not take it on trust.*
+on 2026-10-02 on one Linux host, with rustc 1.98.1 and cargo 1.98.0
+(as reported by `rustc --version` and `cargo --version`). Re-measure it
+with §5; do not take it on trust.*
+
+## 0. Release notes: `v9r-review-v1.1`
+
+*Added 2026-10-02. §1–§9 below describe the frozen baseline
+`v9r-review-v1`, with the guarantee wording corrected for v1.1.*
+
+| | |
+|---|---|
+| **frozen baseline** | `v9r-review-v1`, unchanged and not moved: code commit `6a9c717`, 86 passed, 0 failed, 4 ignored. The v1 documents as tagged are the reference the corrections are made against |
+| **what v1.1 adds: X1/X4 measurement tests** | `crates/v9r-core/tests/self_referential_observers.rs`, 2 tests that assert the measured false ALLOWs (report V9R_SELF_REFERENTIAL_OBSERVERS_V0) |
+| **what v1.1 adds: research documents** | V9R_SELF_REFERENTIAL_OBSERVERS_V0, V9R_ADVERSARIAL_REVIEW_V0 (with measured-status notes), V9R_CLAIM_REVISION_V0, V9R_OBSERVER_INDEPENDENCE_MODEL_V0, V9R_OBSERVER_CAPABILITY_BOUNDARY_V0, V9R_VERIFICATION_BOUNDARY_V0, V9R_RESEARCH_THESIS_V0, V9R_RELEASE_AUDIT_V0, V9R_RELEASE_AUDIT_V1_1, V9R_RELEASE_FREEZE_V1_1 |
+| **what v1.1 corrects: release documentation** | wording only, as identified in V9R_RELEASE_AUDIT_V0: `README.md`, `README_REVIEWER.md`, this document, V9R_PHASE1_EXTERNAL_REVIEW_V0, V9R_REVIEW_CHECKLIST_V1, V9R_EXTERNAL_REVIEW_PACKAGE_V0 |
+| **what v1.1 corrects: demo wording** | the **printed labels and doc comment** of `examples/v9r_demo.rs`, strings only: same agents, rules, observers and five verdicts, still asserted |
+| **what v1.1 does not change: verifier implementation and kernel** | `git diff v9r-review-v1 v9r-review-v1.1 -- crates/v9r-core/src Cargo.toml Cargo.lock crates/v9r-core/Cargo.toml` is empty. `kernel.rs` sha256 `85badb66…6177f`, byte-identical to v1 |
+| **`cargo test --workspace`** | **88 passed, 0 failed, 4 ignored** (86 + X1 + X4); rustc 1.98.1, cargo 1.98.0 |
+| **the claim** | unchanged in substance. Its wording is narrowed where a measurement (X1, X4, G11) or a code fact (`fs_raw.rs:73`, `temporal.rs:526`) showed it said more than the code does. Formal statement: V9R_VERIFICATION_BOUNDARY_V0 §1 |
+| **still predictions, not measured** | X2, X3, X5 and G′ of V9R_ADVERSARIAL_REVIEW_V0 |
+
+Reproduce the v1.1 additions:
+
+```sh
+cargo test --offline --workspace
+#  → 88 passed; 0 failed; 4 ignored
+cargo test --offline -p v9r-core --test self_referential_observers -- --nocapture --test-threads=1
+#  → X1: honest fix Allow, broken module Deny, sys.exit(0) Allow with greet incorrect
+#  → X4 over 10 runs: ALLOW+accepted 10; write landed before completion 10; S1 stale 10
+```
 
 ## 1. Release identity
 
@@ -111,7 +139,7 @@ All 86 test `v9r-core`.
 
 Requirements:
 
-- Linux, Rust 1.98;
+- Linux, Rust 1.98 (measured with rustc 1.98.1, cargo 1.98.0);
 - `python3` (the demo's test runner);
 - `git` (one identity test);
 - network once for `cargo fetch`; everything else works `--offline`.
@@ -183,15 +211,15 @@ or faithful.
 
 | # | Guarantee | Condition | Test |
 |---|---|---|---|
-| G1 | Accepted only if every declared rule is satisfied by **verified** evidence; an actor's claims never satisfy a rule | observers faithful | kernel unit tests; `claims_instead_of_evidence_block`; demo runs 3–4 |
+| G1 | Accepted only if every declared rule is satisfied by evidence **attested by registered observers** in reply to v9r's own requests; an actor's claims never satisfy a rule. An attestation is as true as its observer | observers faithful **and independent of the judged state**. Not met by the demo's test runner: X1 gives Allow with `greet` absent | kernel unit tests; `claims_instead_of_evidence_block`; demo runs 3–4. Limit: `x1_judged_program_decides_the_test_runners_report` (added in v1.1) |
 | G2 | Missing or contradictory evidence → **Blocked**, never Allow | — | `removing_any_observer_blocks_with_missing_evidence_never_denies`, `disagreeing_observers_block`, `observer_disappearing_before_execution_blocks`, `observer_unavailable_after_effect_blocks_and_holds`, `observers_reading_different_versions_block` |
-| G3 | Changes outside a declared scope are **denied and named**: files, symlinks, directories (empty ones too), file modes | observer sees the whole scope. FIFO/socket/device → Blocked | `scope_entries` (18 cases); demo run 2 |
-| G4 | S0 and S1 have exact identities: the SHA-256 git tree id; `git` computes the same id; a claimed id is recomputed | capture trusted | `a_snapshot_is_the_git_tree_of_the_same_content`, `a_claimed_snapshot_id_is_recomputed_not_believed` |
+| G3 | Changes outside a declared scope, present when the after-snapshot is taken, are **denied and named**: names, file content, symlink targets, directories (empty ones too), and the **owner-execute bit** only (`fs_raw.rs:73`) | observer sees the whole scope. FIFO/socket/device → Blocked. Other metadata is not observed | `scope_entries` (18 cases); demo run 2 |
+| G4 | S0 and S1 are identified by the SHA-256 git tree id of the captured tree (names, content, symlink targets, owner-execute bits); `git` computes the same id; a claimed id is recomputed | capture trusted | `a_snapshot_is_the_git_tree_of_the_same_content`, `a_claimed_snapshot_id_is_recomputed_not_believed` |
 | G5 | An omitted subdirectory, an unreadable file, or a lost or altered stored object → identity incomplete (Blocked) | link counts kept by the filesystem. An omitted **file** needs a second observer | `hidden_directory_omitted_by_the_observer_blocks`, `hidden_file_omitted_by_the_observer_blocks_only_with_an_independent_observer`, `unreadable_file_makes_the_snapshot_incomplete`, `approved_snapshot_with_a_lost_or_altered_object_is_incomplete` |
-| G6 | Authorization is single-use and **refused** if the state changed after it was granted; drift **holds** the runtime | change visible to the watched keys | `artifact_changed_after_authorization_is_refused`, `external_modification_between_authorization_and_execution_refuses`; demo run 5 |
+| G6 | Authorization is single-use and **refused** if the watched state differs, at the start of execution, from the one it was granted on; drift **holds** that runtime process (in memory; a new runtime takes the current state as its baseline, `temporal.rs:526`) | change visible to the watched keys | `artifact_changed_after_authorization_is_refused`, `external_modification_between_authorization_and_execution_refuses`; demo run 5 |
 | G7 | Replayed, forwarded, volunteered or anachronistic attestations are dropped | — | `volunteered_attestations_are_discarded`, `replayed_attestations_are_refused`, `replayed_raw_observation_fails_binding`, `before_snapshot_replayed_as_after_is_not_believed`, `evidence_claiming_an_earlier_state_is_refused` |
-| G8 | Anything written inside the window is attributed to the effect | — | `external_modification_during_the_effect_is_attributed_to_it` |
-| G9 | Facts bind to the state they name | rules name the tree | `test_success_for_another_tree_does_not_count` |
+| G8 | Anything written between the fresh observation at the start of execution and the after-snapshot (taken when the actor's call returns) is attributed to the effect. Changes after the after-snapshot are not judged, even while the decision is still running | — | `external_modification_during_the_effect_is_attributed_to_it`. Limit: `x4_watched_state_changes_after_observation_before_completion` (added in v1.1; 40/40 accepted a stale S1) |
+| G9 | Facts bind to the state they name. Binding is not independence: an observer that executes that state is controlled by it | rules name the tree | `test_success_for_another_tree_does_not_count`. Limit: X1 (added in v1.1) |
 | G10 | Each rule's finding names its observer. Provider facts resolve to provider, request, round and snapshot | verifier facts name the verifier and the observers it trusted | `release_is_explained_by_the_lineage_of_its_evidence`, `snapshot_evidence_carries_its_snapshot_in_lineage` |
 | **G11** | **Identical S1 from an authorized actor or an unauthorized writer → identical complete decisions** | by design: this is the claim's boundary | `state_vs_causality`, `identical_s1_gets_identical_decisions_whoever_wrote_it` (with a control world that differs) |
 | G12 | Kernel unchanged since review | — | `kernel_guard` |
@@ -207,8 +235,15 @@ or faithful.
   They cannot disagree; they do not check each other.
 - **Capture is trusted** against a same-uid concurrent writer. The
   double reading catches changes between its readings only.
-- **Checks that execute the judged state are not independent.** The
-  demo's test imports the code under test.
+- **Checks that execute the judged state are controlled by it.** The
+  demo's test imports the code under test. Measured (X1): `sys.exit(0)`
+  on import gives Allow with `greet` absent. The demo's label in v1,
+  "tests pass on the result, run by v9r", overstated I3: it is the test
+  command's exit status on S1. v1.1 relabels it.
+- **The decision covers S1 as captured, not the state at completion.**
+  Measured (X4): a process the actor left behind rewrote the protected
+  test while v9r was deciding; the earlier S1 was accepted 40/40, and
+  the runtime's trusted state no longer matched the workspace.
 
 **What v9r does not do:**
 
@@ -257,6 +292,8 @@ measurement.
 | a sealed snapshot view is safe from the host | the namespace owner (same uid) changed it: **detected, not prevented** | Snapshot Capability Boundary v0 (archived) |
 | signed delegation is enough | a stolen key and a restored runtime still Allow | Capability Root of Trust v0 (archived) |
 | tests that run agent code are evidence about the agent's change | they execute agent-controlled code | Agent Transition Runtime Design v0 (superseded) |
+| a test command run by v9r on S1 is independent evidence about S1 | S1 that `sys.exit(0)`s on import: **false Allow**, `greet` absent | `x1_judged_program_decides_the_test_runners_report` (added in v1.1) |
+| an accepted S1 is the state when the transition completes | a write after the after-snapshot, during the decision: **accepted S1 stale**, 40/40 | `x4_watched_state_changes_after_observation_before_completion` (added in v1.1) |
 | removing a module only removes its tests | the kernel's `compile_fail` example went vacuous | V9R_DEBLOAT_PHASE1_REPORT_V0 §4 |
 
 ## 9. Open research questions
@@ -266,7 +303,8 @@ measurement.
    from two readings of one snapshot?
 2. **Evidence independence.** How should a fact be typed when its
    producer executes the state being judged? Today it is `Verified` like
-   any other.
+   any other, and X1 measured that such a fact can be decided by the
+   judged state.
 3. **Completeness of `snapshot_entries`.** What can change outside the
    scope and leave both the tree id and the entries unchanged? Hard
    links, xattrs, ACLs, ownership, timestamps, mounts inside the scope.

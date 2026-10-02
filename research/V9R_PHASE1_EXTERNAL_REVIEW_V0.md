@@ -5,6 +5,16 @@ for the Phase 1 tree. Every claim below names the test that backs it;
 run them (§7) rather than trusting this text. Measured 2026-10-02, one
 Linux host.*
 
+> **v1.1 wording corrections (2026-10-02).** G1, G3, G4, G6, G8 and G9,
+> §1 steps 4 and 6, and the self-referential limitation in §6 were
+> narrowed to match measurements (X1, X4:
+> V9R_SELF_REFERENTIAL_OBSERVERS_V0) and code facts (`fs_raw.rs:73`,
+> `temporal.rs:526`), as identified in V9R_RELEASE_AUDIT_V0. The test
+> names are unchanged. The counts in §3 and §7 are those of the
+> pre-freeze tree; `v9r-review-v1.1` gives 88 passed, 0 failed,
+> 4 ignored. The formal claim and its boundary:
+> V9R_VERIFICATION_BOUNDARY_V0.
+
 **The one question:** does §1 match what the code and the tests show?
 §8 lists the places we expect it to be weakest.
 
@@ -18,16 +28,20 @@ v9r is a **state transition verifier for untrusted computation**.
    state S0.
 3. Immediately before the actor runs, v9r re-checks the authorization on
    a fresh observation. If the state changed, it refuses.
-4. After the actor ran, v9r observes the result S1 itself, through
-   registered observers, and evaluates declared rules against that
-   evidence.
+4. When the actor's call returns, v9r captures the result S1 and asks
+   its registered observers about it. It evaluates declared rules
+   against their attestations. An attestation is as true as its
+   observer; an observer that executes S1 is controlled by S1 (X1).
+   Changes made after the capture are not judged (X4).
 5. Each rule is Satisfied, Violated or Undetermined. The verdict is
    **Deny** if any rule is violated, else **Blocked** if any is
    undetermined, else **Allow**. Unknown is never treated as true or
    false. An actor's statements enter only as claims, and a claim never
    satisfies a rule.
-6. On Allow, S1 becomes the trusted state. Otherwise v9r **holds** and
-   authorizes nothing further.
+6. On Allow, the captured S1 becomes the runtime's last accepted
+   snapshot. It may already differ from the live state (X4). Otherwise
+   that runtime process **holds** and authorizes nothing further; the
+   hold is in memory only.
 
 **v9r verifies states, not histories.** A decision depends on S0, S1,
 the rules, the observers' answers and the ordering of the window. It does
@@ -98,7 +112,7 @@ correct or faithful.
 | `fs_raw` | **observation of the filesystem**: complete listings, true contents | 222 lines + Linux syscalls |
 | the host OS and filesystem | `openat`/`getdents`/`fstatat`/`read` semantics; directory link counts (used to detect omitted subdirectories) | external |
 | `sha2`, `serde`, `serde_json`, `libc`, `rustc` | hashing, serialization, FFI | external |
-| **every registered provider** (e.g. the demo's test runner) | faithful, complete, current answers | per deployment. A registered liar is believed (`a_trusted_liar_is_believed_alone_…`) |
+| **every registered provider** | faithful, complete, current answers, independent of the state it observes. The demo's test runner is **not** independent: it runs S1's code (X1) | per deployment. A registered liar is believed (`a_trusted_liar_is_believed_alone_…`) |
 | **the invariants** (the rules) | expressing what "acceptable" means | written by the host; trusted configuration |
 | **whoever holds the `Registry`** | deciding which observers count | privileged |
 | capture | no concurrent writer while a snapshot is taken, unless detected by a double reading | trusted (Atomic Capture v0) |
@@ -114,15 +128,15 @@ correct or faithful.
 
 | # | Guarantee | Holds when | Test |
 |---|---|---|---|
-| G1 | A transition is accepted only if every declared rule is satisfied by **verified** evidence; claims never satisfy a rule | TCB (§4) correct; observers faithful | kernel unit tests; `claims_instead_of_evidence_block`; demo run 3 |
+| G1 | A transition is accepted only if every declared rule is satisfied by evidence **attested by registered observers** in reply to v9r's own requests; claims never satisfy a rule. An attestation is as true as its observer | TCB (§4) correct; observers faithful, complete, current **and independent of the judged state**. Not met by the demo's test runner: X1 gives Allow with `greet` absent | kernel unit tests; `claims_instead_of_evidence_block`; demo run 3. Limit: `x1_judged_program_decides_the_test_runners_report` |
 | G2 | Missing or contradictory evidence gives **Blocked**, never Allow | — | `removing_any_observer_…`, `disagreeing_observers_block`, `observer_disappearing_…`, `observer_unavailable_after_effect_…`, `observers_reading_different_versions_block` |
-| G3 | Changes outside a declared scope are **denied and named**; scope covers files, symlinks, directories (empty ones too) and file modes | the observer sees the whole scope; special files (FIFO, socket, device) make the state unrepresentable → **Blocked**, not Deny | `scope_entries` (18 cases); demo run 2 |
-| G4 | S0 and S1 have exact identities: the SHA-256 git tree id, the same id `git` computes | after capture; capture itself is trusted | `a_snapshot_is_the_git_tree_of_the_same_content` (runs `git`); `a_claimed_snapshot_id_is_recomputed_not_believed` |
+| G3 | Changes outside a declared scope, present when the after-snapshot is taken, are **denied and named**; scope covers names, file content, symlink targets, directories (empty ones too) and the **owner-execute bit** only (`fs_raw.rs:73`). Other metadata is not observed | the observer sees the whole scope; special files (FIFO, socket, device) make the state unrepresentable → **Blocked**, not Deny | `scope_entries` (18 cases); demo run 2 |
+| G4 | S0 and S1 are identified by the SHA-256 git tree id of the captured tree, the same id `git` computes: names, content, symlink targets, owner-execute bits | after capture; capture itself is trusted | `a_snapshot_is_the_git_tree_of_the_same_content` (runs `git`); `a_claimed_snapshot_id_is_recomputed_not_believed` |
 | G5 | An omitted subdirectory, an unreadable file, or a lost or altered stored object makes the identity **incomplete** (Blocked) | the filesystem keeps directory link counts; an omitted *file* is caught only with an independent second observer | `hidden_directory_…`, `hidden_file_…_only_with_an_independent_observer`, `unreadable_file_…`, `approved_snapshot_with_a_lost_or_altered_object_…` |
-| G6 | An authorization is single-use and **refused** if the state changed after it was granted; drift from the trusted state **holds** the runtime | the change is visible to the watched keys | `artifact_changed_after_authorization_is_refused`, `external_modification_between_authorization_and_execution_refuses`; demo run 5 |
+| G6 | An authorization is single-use and **refused** if the watched state differs, at the start of execution, from the one it was granted on; drift **holds** that runtime process. The hold is in memory; a new runtime takes the current state as its baseline (`temporal.rs:526`) | the change is visible to the watched keys | `artifact_changed_after_authorization_is_refused`, `external_modification_between_authorization_and_execution_refuses`; demo run 5 |
 | G7 | Answers are bound to the provider and request that produced them: replayed, forwarded, volunteered or anachronistic attestations are dropped | — | `volunteered_attestations_…`, `replayed_attestations_…`, `replayed_raw_observation_fails_binding`, `before_snapshot_replayed_as_after_…`, `evidence_claiming_an_earlier_state_…` |
-| G8 | A change written by anyone inside the window is **attributed to the effect** | — | `external_modification_during_the_effect_is_attributed_to_it` |
-| G9 | Facts bind to the state they name (a test result for another tree does not count) | rules name the tree | `test_success_for_another_tree_does_not_count` |
+| G8 | A change written by anyone between the fresh observation at the start of execution and the after-snapshot (taken when the actor's call returns) is **attributed to the effect**. Changes after the after-snapshot are not judged, even while the decision is still running | — | `external_modification_during_the_effect_is_attributed_to_it`. Limit: `x4_watched_state_changes_after_observation_before_completion` (40/40 accepted a stale S1) |
+| G9 | Facts bind to the state they name (a test result for another tree does not count). Binding is not independence: an observer that executes that state is controlled by it (X1) | rules name the tree | `test_success_for_another_tree_does_not_count` |
 | G10 | Decisions are explained per rule, naming the observer; provider facts resolve to provider, request, round and snapshot | for provider facts; verifier facts name the verifier and the observers it trusted | `release_is_explained_…`, `snapshot_evidence_carries_its_snapshot_in_lineage` |
 | G11 | **Boundary:** identical S1 from an authorized actor or an unauthorized writer gets identical decisions | by design | `state_vs_causality`, `identical_s1_gets_identical_decisions_whoever_wrote_it` (complete decisions; control world with different bytes differs) |
 | G12 | The kernel is unchanged since review | — | `kernel_guard` |
@@ -143,8 +157,13 @@ correct or faithful.
 - **Capture is trusted** against a concurrent writer of the same uid. The
   double reading detects changes between readings, not changes it
   happens to read consistently twice.
-- **Checks that run the code being judged are not independent of it.**
-  The demo's I3 runs a test that imports the judged code.
+- **Checks that run the code being judged are controlled by it.**
+  The demo's I3 runs a test that imports the judged code. Measured:
+  `sys.exit(0)` on import gives Allow with `greet` absent; the same
+  module without the exit is denied (X1).
+- **The decision covers S1 as captured.** A process left behind by the
+  actor rewrote the protected test while v9r was deciding; the earlier
+  S1 was accepted in 40/40 transitions (X4).
 - **Freshness across restarts.** The runtime's state (trusted snapshot,
   hold) is in memory.
 
@@ -175,7 +194,7 @@ correct or faithful.
 
 ## 7. Reproduction
 
-Requirements: Rust 1.98 (offline build with the committed `Cargo.lock`),
+Requirements: Rust 1.98, measured with rustc 1.98.1 and cargo 1.98.0 (offline build with the committed `Cargo.lock`),
 `python3` (demo), `git` (one test).
 
 ```sh
@@ -209,7 +228,9 @@ Run them with `--ignored --nocapture`.
 ## 8. Questions for the reviewer to attack
 
 1. **Can an actor get Allow for a state that violates a declared rule,
-   with every registered observer honest?** Start at `runtime.rs`
+   with every registered observer honest?** (X1 measured the nearby
+   case: every rule satisfied, every observer faithful, and the
+   property the rule was meant to express false.) Start at `runtime.rs`
    `execute`/`settle` and `temporal.rs` `evidence`.
 2. **Can a fact verified for one moment be used for another?** For
    example, an `@s<before>` value satisfying an `@s<after>` obligation,
