@@ -148,3 +148,13 @@ cargo test --offline -p v9r-core --test state_vs_causality -- --nocapture
 ```
 
 This needs nothing beyond the crate. It takes under a second.
+
+## Re-measured after Debloat Phase 1
+
+Re-run on 2026-10-02 after `fs_provider` was removed
+(V9R_DEBLOAT_PHASE1_REPORT_V0, §6). I2 now reads `snapshot_entries(ws)`
+from `verifier:fs-snapshot` instead of `entries(ws)` from
+`provider:fs`, so those two table rows have new values and
+`provider:fs` is no longer among the observers. Every measured field is
+still identical between World A and World B; S0 and S1 are unchanged.
+The decision (A) stands.

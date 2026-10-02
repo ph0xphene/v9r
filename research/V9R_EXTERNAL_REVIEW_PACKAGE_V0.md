@@ -1,5 +1,48 @@
 # v9r External Review Package v0
 
+> **Release status (added at the v1 freeze, 2026-10-02).** This document
+> describes `v9r-review-v0`. The current release candidate is
+> **`v9r-review-v1`**: the Debloat Phase 1 verifier.
+>
+> **Revision:**
+>
+> - Code commit: `6a9c717695e3cf00b72e97b758283af3ab5e707e`.
+> - The tag points at the documentation commit that follows it; that
+>   commit changes no code. Check with
+>   `git diff 6a9c717 v9r-review-v1 -- crates Cargo.toml Cargo.lock`
+>   (empty).
+>
+> **Tests and kernel:**
+>
+> - `cargo test --workspace`: **86 passed, 0 failed, 4 ignored**.
+> - Kernel hash guard: passed. `kernel.rs` sha256 `85badb66…6177f` is
+>   unchanged from `v9r-review-v0`.
+>
+> **Modules:** one crate, `v9r-core`, with **12 modules + `lib.rs`** and
+> 4,838 lines of library code:
+>
+> - claim path: `kernel`, `runtime`, `temporal`, `graph`, `verify`,
+>   `snapshot`, `fs_raw`, `verifiers`, `content`;
+> - explanations: `provenance`;
+> - historical: `counter`, `fs_watch`.
+>
+> **Trusted computing base:**
+>
+> - `kernel`, `runtime`, `temporal`;
+> - the `graph` registry with `verify`;
+> - `snapshot` (`FsSnapshot`, `ObjectStore`);
+> - `fs_raw` with the Linux filesystem;
+> - every registered observer, the rules, and whoever holds the registry;
+> - snapshot capture (no undetected concurrent writer);
+> - external crates: `serde`, `serde_json`, `sha2`, `libc` (20 in the
+>   build graph).
+>
+> **Archived:** the capability, delegation, git and product-phase code
+> named below was removed from the review tree and is preserved at
+> `v9r-archive-v0`. See research/V9R_RELEASE_FREEZE_V1.md and
+> README_REVIEWER.md.
+
+
 For a systems engineer seeing v9r for the first time. Please read it as
 a claim to be attacked, not a product description. Everything stated as
 a result was measured on one Linux host (6.12, unprivileged, ext4 and
