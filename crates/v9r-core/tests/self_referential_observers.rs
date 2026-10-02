@@ -1,5 +1,5 @@
 //! Self-Referential Observers v0: measurements of adversarial findings X1
-//! and X4 (V9R_ADVERSARIAL_REVIEW_V0), on the demo's structure.
+//! and X4 (research/archive/V9R_ADVERSARIAL_REVIEW_V0.md), on the demo's structure.
 //!
 //! These tests **assert the false ALLOW**. They keep a limit of the
 //! observer model measured, the way `claim_guarantees` keeps the liar and

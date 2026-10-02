@@ -1,4 +1,21 @@
-# v9r Archive Boundary v0
+# What happened to the old runtime: archive boundary
+
+> Formerly `research/V9R_ARCHIVE_BOUNDARY_V0.md` (the v9r-review-v1.1 tree has it under that name). Body unchanged apart from document links.
+
+> **Outcome.** This document was written as a recommendation. It was
+> carried out in Debloat Phase 1 (commits `e466b76`, `6a9c717`):
+>
+> - the four product-phase crates (§1) left the tree. They remain,
+>   byte-identical, at the annotated tag `v9r-archive-v0` (=
+>   `v9r-review-v0`, commit `da6d694`);
+> - the three dead APIs (§3) were removed; `counter`, `fs_watch` and
+>   `content` were kept (§2);
+> - §5 Option A was taken.
+>
+> §5's statements about which tags exist where describe the repository
+> when this was written. As of 2026-10-02 the archive tags are not
+> published on GitHub; a clone without `v9r-archive-v0` cannot run the
+> archived experiments.
 
 *Decides what belongs to the Phase 1 verifier and what belongs to the
 archive. Nothing was deleted or changed while writing this.
@@ -14,7 +31,7 @@ Possible actions:
 
 The test for each item is the claim, *"v9r verifies state transitions,
 not histories"*: does removing the item change any guarantee in
-V9R_PHASE1_EXTERNAL_REVIEW_V0 §5?
+[V9R_PHASE1_EXTERNAL_REVIEW_V0](archive/V9R_PHASE1_EXTERNAL_REVIEW_V0.md) §5?
 
 ## 1. The four product-phase crates
 
@@ -24,7 +41,7 @@ V9R_PHASE1_EXTERNAL_REVIEW_V0 §5?
 | size | 827 lines, 7 tests | 363 lines, 11 tests | 1,161 lines, 8 tests | 965 lines, 11 tests |
 | milestone | product phase: commit `059ef29` "implement transactional runtime with atomic rollbacks" (2026-05-11), before the research branch | same | same | same |
 | last change to its source | `059ef29` | `059ef29` (Phase 1 removed an unused `tracing` dependency) | `059ef29` | `059ef29` |
-| measured by a research report? | no. EFFECT_RUNTIME_V0: "**Not involved** in the host-filesystem transaction path" | no. EFFECT_RUNTIME_V0: "Not reused. `v9r-cap` governs the in-memory VFS" | no | no |
+| measured by a research report? | no. [EFFECT_RUNTIME_V0](archive/EFFECT_RUNTIME_V0.md): "**Not involved** in the host-filesystem transaction path" | no. [EFFECT_RUNTIME_V0](archive/EFFECT_RUNTIME_V0.md): "Not reused. `v9r-cap` governs the in-memory VFS" | no | no |
 
 **Why they are not part of the verifier claim:**
 

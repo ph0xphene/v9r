@@ -31,18 +31,18 @@ This is research code. Reviewers: start with
   change to S0 after approval is refused.
 
 The formal statement of the claim and its conditions is
-[research/V9R_VERIFICATION_BOUNDARY_V0.md](research/V9R_VERIFICATION_BOUNDARY_V0.md).
+[research/verification-boundary.md](research/verification-boundary.md).
 
 ## What v9r does not verify
 
 - **Who produced the state.** v9r verifies states, not histories. An
   unauthorized writer who produces the same S1 gets the same decisions
-  ([research/STATE_VS_CAUSALITY_V0.md](research/STATE_VS_CAUSALITY_V0.md)).
+  ([research/causality.md](research/causality.md)).
 - **Observer independence.** A registered observer is believed, not
   checked. An observer that runs the code being judged, such as a test
   runner, is controlled by that code. Measured: a module that calls
   `sys.exit(0)` on import is accepted with the tested function absent
-  ([research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md](research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md), X1).
+  ([research/observer-boundary.md](research/observer-boundary.md), X1).
 - **Program correctness.** A rule such as "the test command exits 0 on
   S1" reports an exit status, not that the code is correct.
 - **Changes after capture.** Writes made after S1 is captured, even
@@ -68,7 +68,7 @@ limitations is in [README_REVIEWER.md](README_REVIEWER.md).
 The project's earlier "transactional shell" (CLI, rollback, bundles,
 LLM providers, VFS, Wasm agent host) was removed in Debloat Phase 1. It
 is not part of the verifier
-([research/V9R_ARCHIVE_BOUNDARY_V0.md](research/V9R_ARCHIVE_BOUNDARY_V0.md)).
+([research/archive-boundary.md](research/archive-boundary.md)).
 
 ## Reproduce the demo
 
@@ -107,13 +107,15 @@ cargo test --offline -p v9r-core --test kernel_guard
   and demo wording. The verifier implementation and `kernel.rs` are
   unchanged from the previous review release.
 
-Release record: [research/V9R_RELEASE_FREEZE_V1_1.md](research/V9R_RELEASE_FREEZE_V1_1.md).
+How to reproduce and review it: [research/release.md](research/release.md).
 
 Documents for reviewers:
 
 - [README_REVIEWER.md](README_REVIEWER.md): entrypoint, trusted
   computing base, limitations, reading order;
-- [research/V9R_VERIFICATION_BOUNDARY_V0.md](research/V9R_VERIFICATION_BOUNDARY_V0.md):
+- [research/verification-boundary.md](research/verification-boundary.md):
   the claim and where it ends;
-- [research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md](research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md):
-  the X1/X4 measurements.
+- [research/observer-boundary.md](research/observer-boundary.md):
+  the X1/X4 measurements;
+- [research/README.md](research/README.md): the research documents in
+  reading order, and the archive of historical process records.

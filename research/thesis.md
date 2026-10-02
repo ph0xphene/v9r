@@ -1,4 +1,6 @@
-# v9r Research Thesis v0
+# Why v9r exists: research thesis
+
+> Formerly `research/V9R_RESEARCH_THESIS_V0.md` (the v9r-review-v1.1 tree has it under that name). Body unchanged apart from document links.
 
 *The final research thesis of v9r Phase 1. It states what was asked,
 what was measured, and what follows. It is not an implementation plan.
@@ -12,12 +14,12 @@ capability that has not been measured.*
 
 | Short name | Report |
 |---|---|
-| **Kernel** | INVARIANT_KERNEL_V0 |
-| **Effect v0 / v1** | EFFECT_RUNTIME_V0, EFFECT_RUNTIME_V1 |
-| **Causality** | STATE_VS_CAUSALITY_V0 |
-| **Self-ref** | V9R_SELF_REFERENTIAL_OBSERVERS_V0 |
-| **Cap-boundary** | V9R_OBSERVER_CAPABILITY_BOUNDARY_V0 |
-| **Boundary** | V9R_VERIFICATION_BOUNDARY_V0 |
+| **Kernel** | [INVARIANT_KERNEL_V0](archive/INVARIANT_KERNEL_V0.md) |
+| **Effect v0 / v1** | [EFFECT_RUNTIME_V0](archive/EFFECT_RUNTIME_V0.md), [EFFECT_RUNTIME_V1](archive/EFFECT_RUNTIME_V1.md) |
+| **Causality** | [causality](causality.md) |
+| **Self-ref** | [observer-boundary](observer-boundary.md) |
+| **Cap-boundary** | [V9R_OBSERVER_CAPABILITY_BOUNDARY_V0](archive/V9R_OBSERVER_CAPABILITY_BOUNDARY_V0.md) |
+| **Boundary** | [verification-boundary](verification-boundary.md) |
 
 Results that Cap-boundary and Boundary cite from other reports are used
 as they cite them.
@@ -54,7 +56,7 @@ reproduced by a failing test first.
 code was fixed, or that the tests were changed. A pipeline that trusts
 the report, or only re-runs checks the agent could influence, cannot
 tell the difference."*
-(V9R_EXTERNAL_REVIEW_PACKAGE_V0 §1.)
+([V9R_EXTERNAL_REVIEW_PACKAGE_V0](archive/V9R_EXTERNAL_REVIEW_PACKAGE_V0.md) §1.)
 
 ## 2. The hypothesis tested
 
@@ -224,7 +226,7 @@ checks bound the first only.
 | program correctness | nothing directly | X1 vs the honest fix: same verdict, different correctness |
 
 One pair is defined and not run: observer validity varied **with S1
-fixed** (V9R_OBSERVER_INDEPENDENCE_MODEL_V0 §6.3). Until it runs, the
+fixed** ([V9R_OBSERVER_INDEPENDENCE_MODEL_V0](archive/V9R_OBSERVER_INDEPENDENCE_MODEL_V0.md) §6.3). Until it runs, the
 separation of observer validity from correctness rests on X1, where the
 two moved together.
 

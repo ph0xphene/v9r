@@ -1,4 +1,6 @@
-# State vs Causality v0: does v9r verify states or histories?
+# Why v9r verifies states, not histories
+
+> Formerly `research/STATE_VS_CAUSALITY_V0.md` (the v9r-review-v1.1 tree has it under that name). Body unchanged apart from document links.
 
 Research question: **if an unauthorized actor produces exactly the state
 an authorized agent would have produced, does v9r tell them apart?**
@@ -152,7 +154,7 @@ This needs nothing beyond the crate. It takes under a second.
 ## Re-measured after Debloat Phase 1
 
 Re-run on 2026-10-02 after `fs_provider` was removed
-(V9R_DEBLOAT_PHASE1_REPORT_V0, §6). I2 now reads `snapshot_entries(ws)`
+([V9R_DEBLOAT_PHASE1_REPORT_V0](archive/V9R_DEBLOAT_PHASE1_REPORT_V0.md), §6). I2 now reads `snapshot_entries(ws)`
 from `verifier:fs-snapshot` instead of `entries(ws)` from
 `provider:fs`, so those two table rows have new values and
 `provider:fs` is no longer among the observers. Every measured field is

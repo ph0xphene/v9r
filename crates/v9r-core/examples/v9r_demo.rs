@@ -11,7 +11,7 @@
 //!
 //! The test observer runs the protected test on a checkout of S1, so S1's
 //! code runs inside it: its report is not independent evidence about S1
-//! (research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md, X1).
+//! (research/observer-boundary.md, X1).
 
 use std::fs;
 use std::path::PathBuf;

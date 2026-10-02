@@ -1,4 +1,6 @@
-# v9r Verification Boundary v0
+# What v9r claims: the verification boundary
+
+> Formerly `research/V9R_VERIFICATION_BOUNDARY_V0.md` (the v9r-review-v1.1 tree has it under that name). Body unchanged apart from document links.
 
 *The final model document before any Phase 2 work. It defines what v9r
 verifies and where that stops. It proposes no code change and does not
@@ -12,14 +14,14 @@ they name:
 
 | Short name | Report | What it contributes |
 |---|---|---|
-| **Kernel** | INVARIANT_KERNEL_V0 | the decision semantics; Verified ≠ Semantic ≠ Proposed by construction; unknown never collapses |
-| **Causality** | STATE_VS_CAUSALITY_V0 | identical S1 from an authorized and an unauthorized writer → identical decisions |
-| **Self-ref** | V9R_SELF_REFERENTIAL_OBSERVERS_V0 | X1: an observer that executes S1 is controlled by it; X4: a change after capture is not judged |
-| **Cap-boundary** | V9R_OBSERVER_CAPABILITY_BOUNDARY_V0, and the archived reports it cites | which parts of observer independence reduce to authority (I-eff) and which do not (I-out) |
-| Guarantees | V9R_RELEASE_FREEZE_V1 §6, `claim_guarantees`, `content_addressed`, `scope_entries` | G1–G12, as narrowed in V9R_CLAIM_REVISION_V0 |
+| **Kernel** | [INVARIANT_KERNEL_V0](archive/INVARIANT_KERNEL_V0.md) | the decision semantics; Verified ≠ Semantic ≠ Proposed by construction; unknown never collapses |
+| **Causality** | [causality](causality.md) | identical S1 from an authorized and an unauthorized writer → identical decisions |
+| **Self-ref** | [observer-boundary](observer-boundary.md) | X1: an observer that executes S1 is controlled by it; X4: a change after capture is not judged |
+| **Cap-boundary** | [V9R_OBSERVER_CAPABILITY_BOUNDARY_V0](archive/V9R_OBSERVER_CAPABILITY_BOUNDARY_V0.md), and the archived reports it cites | which parts of observer independence reduce to authority (I-eff) and which do not (I-out) |
+| Guarantees | [V9R_RELEASE_FREEZE_V1](archive/V9R_RELEASE_FREEZE_V1.md) §6, `claim_guarantees`, `content_addressed`, `scope_entries` | G1–G12, as narrowed in [V9R_CLAIM_REVISION_V0](archive/V9R_CLAIM_REVISION_V0.md) |
 
 Two definitions come from the model documents rather than from a
-report: V9R_OBSERVER_INDEPENDENCE_MODEL_V0 (the four observer
+report: [V9R_OBSERVER_INDEPENDENCE_MODEL_V0](archive/V9R_OBSERVER_INDEPENDENCE_MODEL_V0.md) (the four observer
 properties and adequacy) and Cap-boundary (I-eff, I-out). They are used
 as defined there.
 
@@ -139,9 +141,9 @@ with the measurement that refutes it.
 | "the accepted state is the state when the decision completes" | Self-ref X4 | accepted S1 ≠ live tree, 40/40 |
 | "the command succeeded" | Kernel (archived) | `touch made.txt no-such-dir/x`: **Allow although exit 1**. The verified effect met the postcondition. Verdicts are about states, not about program success |
 | "a failed command means a rejected state" | Kernel (archived) | `true` expecting `report.txt`: **Deny although exit 0** |
-| "the captured tree existed at one instant" | ATOMIC_CAPTURE_V0 | detection strategies, alone and combined, accepted a false snapshot. Only the cgroup freezer gave 200/200, and only while writers could not leave |
+| "the captured tree existed at one instant" | [ATOMIC_CAPTURE_V0](archive/ATOMIC_CAPTURE_V0.md) | detection strategies, alone and combined, accepted a false snapshot. Only the cgroup freezer gave 200/200, and only while writers could not leave |
 | "observers are independent because they are isolated" | Cap-boundary | X1 uses no authority an isolated test runner would lack |
-| "a rejected state stays rejected" | CAPABILITY_ROOT_OF_TRUST_V0 (archived) | a runtime restored from backup accepted an old ledger (Allow). v9r's hold is in-process only (code: `temporal.rs:526`) |
+| "a rejected state stays rejected" | [CAPABILITY_ROOT_OF_TRUST_V0](archive/CAPABILITY_ROOT_OF_TRUST_V0.md) (archived) | a runtime restored from backup accepted an old ledger (Allow). v9r's hold is in-process only (code: `temporal.rs:526`) |
 
 ## 3. The boundary between the four layers
 
@@ -180,7 +182,7 @@ layers are separate:
 
 **Not yet witnessed by a pair:** observer validity varied **with S1
 held fixed**. X1 moved observer validity and correctness together. The
-four-cell experiment in V9R_OBSERVER_INDEPENDENCE_MODEL_V0 §6.3 is the
+four-cell experiment in [V9R_OBSERVER_INDEPENDENCE_MODEL_V0](archive/V9R_OBSERVER_INDEPENDENCE_MODEL_V0.md) §6.3 is the
 smallest pair that would. It is defined there and not run.
 
 ### 3.4 How the layers depend on each other
@@ -217,12 +219,12 @@ smallest pair that would. It is defined there and not run.
 | program correctness | S1's code does what is meant | X1: the rule's key is not the meant property |
 | test adequacy | a test that passes is a good test | X1: the protected test is satisfied by exiting on import |
 | observer validity | attestations are true, complete, current, independent | liar, omitted file, stale, X1 |
-| actor containment | the actor cannot act outside the transition | X4: its leftover process wrote during the decision. Containment was measured as feasible only by construction (CONTROLLED_DOMAIN_V0, archived) and is not part of v9r |
+| actor containment | the actor cannot act outside the transition | X4: its leftover process wrote during the decision. Containment was measured as feasible only by construction ([CONTROLLED_DOMAIN_V0](archive/CONTROLLED_DOMAIN_V0.md), archived) and is not part of v9r |
 | decision-time currency | the accepted state is the live state at completion | X4 |
-| atomic capture | the captured tree existed at one instant | ATOMIC_CAPTURE_V0 |
+| atomic capture | the captured tree existed at one instant | [ATOMIC_CAPTURE_V0](archive/ATOMIC_CAPTURE_V0.md) |
 | persistence across restart | approval and hold survive the process | in-memory only (code); restore accepted stale state (ROOT_OF_TRUST, archived) |
 | metadata integrity | ownership, group/other bits, xattrs, ACLs, timestamps | not in the identity (code: `fs_raw.rs:73`); measured for the owner-execute bit only, via `scope_entries` |
-| same-uid interference | protection from processes with the verifier's uid | SNAPSHOT_CAPABILITY_BOUNDARY_V0 (archived): the namespace owner changed a sealed view, **detected, not prevented** |
+| same-uid interference | protection from processes with the verifier's uid | [SNAPSHOT_CAPABILITY_BOUNDARY_V0](archive/SNAPSHOT_CAPABILITY_BOUNDARY_V0.md) (archived): the namespace owner changed a sealed view, **detected, not prevented** |
 | intent and reasoning | why the actor did what it did | claims are inert (clause 3) |
 | rollback | restoring S0 after rejection | the runtime holds; nothing restores |
 
@@ -266,8 +268,8 @@ properties":
 |---|---|---|
 | every registered observer | faithful, complete, current | liar; omitted file; stale |
 | every observer that executes anything | independent of the judged state (I-out and I-eff) | X1; I-eff (G′) unmeasured |
-| `fs_raw` + the Linux filesystem | true and complete raw observation; directory link counts | the `openat` correspondence defect, 3 in 200,000, fixed (ATOMIC_CAPTURE_V0) |
-| snapshot capture | no undetected concurrent writer | ATOMIC_CAPTURE_V0 |
+| `fs_raw` + the Linux filesystem | true and complete raw observation; directory link counts | the `openat` correspondence defect, 3 in 200,000, fixed ([ATOMIC_CAPTURE_V0](archive/ATOMIC_CAPTURE_V0.md)) |
+| snapshot capture | no undetected concurrent writer | [ATOMIC_CAPTURE_V0](archive/ATOMIC_CAPTURE_V0.md) |
 | the rules and whoever holds the registry | adequacy: keys mean what the author means; which observers count | X1 |
 | the host | nothing writes the watched state between the after-snapshot and completion; S0 approval and hold survive restarts if needed | X4; ROOT_OF_TRUST (archived) |
 
@@ -299,7 +301,7 @@ expectation exists, it says so.
 
 | Problem | Why, from measurement | Status |
 |---|---|---|
-| **X4**: actor processes writing during the decision | process-tree writers, including a delayed writer after its parent exits, were contained, frozen and killed from L1. Self-migration was closed at L2 (CONTROLLED_DOMAIN_V0) | measured for agent worlds, archived; **not measured in a v9r transition** |
+| **X4**: actor processes writing during the decision | process-tree writers, including a delayed writer after its parent exits, were contained, frozen and killed from L1. Self-migration was closed at L2 ([CONTROLLED_DOMAIN_V0](archive/CONTROLLED_DOMAIN_V0.md)) | measured for agent worlds, archived; **not measured in a v9r transition** |
 | **I-eff (A5)**: an executing observer changing the judged state | an observer is an actor for authority. Construction from a manifest (9/9), a materialized read-only view (9/9), and IPC closure (11/11 at L7–L8) bound its writes | components measured, archived; **never assembled for an observer** |
 | **A7**: torn capture | the freezer gave 200/200 true snapshots while writers could not leave | measured, archived |
 | **causal attribution** | Causality: World B "could be distinguished *with*" an isolating executor | **expectation, not measurement** (Causality, "What this does not show") |
@@ -315,10 +317,10 @@ expressed containment and identity with `kernel.rs` unchanged.
 |---|---|
 | **I-out (X1)** | X1 uses only the authority an isolated test runner must hold. The judged code decides the report whatever the runner's boundary (Cap-boundary §4) |
 | **program correctness, test adequacy (A6)** | these are about what the rule's key means. No constraint on execution changes what a key means |
-| **observer faithfulness, completeness, currency (A1–A3)** | the layer's own reports are attestations, and the same conditions apply to it. World W: code running before a reporter controlled its report (CAPABILITY_MANIFEST_V0) |
-| **same-uid namespace owner** | changed a sealed view: detected, not prevented (SNAPSHOT_CAPABILITY_BOUNDARY_V0) |
-| **supplementary groups, harness tools** | not removable unprivileged, or not visible to the OS (CAPABILITY_INVENTORY_V0) |
-| **restart freshness (A10)** | a runtime restored from backup accepted a stale ledger; no rollback-protected counter is available unprivileged (CAPABILITY_ROOT_OF_TRUST_V0) |
+| **observer faithfulness, completeness, currency (A1–A3)** | the layer's own reports are attestations, and the same conditions apply to it. World W: code running before a reporter controlled its report ([CAPABILITY_MANIFEST_V0](archive/CAPABILITY_MANIFEST_V0.md)) |
+| **same-uid namespace owner** | changed a sealed view: detected, not prevented ([SNAPSHOT_CAPABILITY_BOUNDARY_V0](archive/SNAPSHOT_CAPABILITY_BOUNDARY_V0.md)) |
+| **supplementary groups, harness tools** | not removable unprivileged, or not visible to the OS ([CAPABILITY_INVENTORY_V0](archive/CAPABILITY_INVENTORY_V0.md)) |
+| **restart freshness (A10)** | a runtime restored from backup accepted a stale ledger; no rollback-protected counter is available unprivileged ([CAPABILITY_ROOT_OF_TRUST_V0](archive/CAPABILITY_ROOT_OF_TRUST_V0.md)) |
 | **metadata outside the identity (A11)** | a property of the identity, not of execution |
 | **the trust itself** | it moves trust from "observers are honest" to "the layer and its reporter are honest". It does not remove it |
 

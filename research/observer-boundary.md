@@ -1,7 +1,9 @@
-# v9r Self-Referential Observers v0
+# Where the claim breaks: observer boundary
+
+> Formerly `research/V9R_SELF_REFERENTIAL_OBSERVERS_V0.md` (the v9r-review-v1.1 tree has it under that name). Body unchanged apart from document links §1–§9 are that measurement report; §10 summarizes the observer independence model it led to.
 
 *Measurement of adversarial findings X1 and X4
-(V9R_ADVERSARIAL_REVIEW_V0) on the demo's setup. Measured on
+([V9R_ADVERSARIAL_REVIEW_V0](archive/V9R_ADVERSARIAL_REVIEW_V0.md)) on the demo's setup. Measured on
 2026-10-02, one Linux host (6.12), rustc 1.98.1, cargo 1.98.0, Python 3.12.13.*
 
 **Revision measured:** the code of `v9r-review-v1` (code commit
@@ -33,7 +35,7 @@ Two sub-questions:
 
 ## 2. Existing claim being tested
 
-From V9R_RELEASE_FREEZE_V1 §6, as released:
+From [V9R_RELEASE_FREEZE_V1](archive/V9R_RELEASE_FREEZE_V1.md) §6, as released:
 
 - **G1:** "Accepted only if every declared rule is satisfied by
   **verified** evidence."
@@ -43,7 +45,7 @@ From V9R_RELEASE_FREEZE_V1 §6, as released:
 - The demo's rule I3: "tests pass on the result, run by v9r"; its
   closing line: "Every decision came from what v9r observed."
 
-V9R_CLAIM_REVISION_V0 predicted, from code reading only, that X1 and X4
+[V9R_CLAIM_REVISION_V0](archive/V9R_CLAIM_REVISION_V0.md) predicted, from code reading only, that X1 and X4
 each give a false ALLOW.
 
 ## 3. Experimental setup
@@ -223,8 +225,8 @@ measured** and remains predicted.
   positives.
 
 **Not affected (not exercised here; still supported by the tests that
-measure them):** G2–G7 and G10–G12 of V9R_RELEASE_FREEZE_V1, in the
-narrowed wording of V9R_CLAIM_REVISION_V0 §1.1.
+measure them):** G2–G7 and G10–G12 of [V9R_RELEASE_FREEZE_V1](archive/V9R_RELEASE_FREEZE_V1.md), in the
+narrowed wording of [V9R_CLAIM_REVISION_V0](archive/V9R_CLAIM_REVISION_V0.md) §1.1.
 
 **Still predicted, not measured:** X2 (write after `execute` returns),
 X3 (metadata outside the identity), X5 (restart launders a rejected
@@ -237,7 +239,7 @@ These are listed so they are not mistaken for results:
 - **Typing evidence by independence:** mark facts produced by executing
   the judged state as self-referential, so a rule can refuse them. It
   touches what `Verified` means, so it is a kernel question
-  (V9R_CLAIM_REVISION_V0 §4.2).
+  ([V9R_CLAIM_REVISION_V0](archive/V9R_CLAIM_REVISION_V0.md) §4.2).
 - **A runner outside the judged state's authority:** separate uid,
   namespaces, no write access to the live workspace. The archived
   Controlled Domain and Capability Manifest experiments measured parts
@@ -250,3 +252,104 @@ These are listed so they are not mistaken for results:
   processes the actor left running when `act` returned. That would
   address X4's writer; it would not address X1, where the report is
   faithful and the rule is weak.
+
+## 10. Observer independence: what X1 and X4 mean
+
+*A summary of two model documents that followed this measurement,
+[V9R_OBSERVER_INDEPENDENCE_MODEL_V0](archive/V9R_OBSERVER_INDEPENDENCE_MODEL_V0.md)
+(abbreviated IM below) and
+[V9R_OBSERVER_CAPABILITY_BOUNDARY_V0](archive/V9R_OBSERVER_CAPABILITY_BOUNDARY_V0.md)
+(CB). Nothing was built or run for either. Definitions are theirs; the
+measurements are §4–§5 above.*
+
+### 10.1 Valid evidence needs four observer properties and one rule property
+
+| Property | Statement | Violated means |
+|---|---|---|
+| **faithful** | O reports the value it actually observed or computed | O lies |
+| **complete** | O's observation covers everything the meant property P(S) depends on | O omits something P depends on |
+| **current** | *observer currency*: O read the state named, not a cached one. *Decision currency*: that state is still the state when the decision completes | O re-attests an old value, or the state moved on |
+| **independent** | *I-out*: S affects O's output only through P(S). *I-eff*: O's execution does not change S or any watched state | S chooses O's output; or observing S changes what is judged |
+
+Plus **adequacy** of the rule: the key k, as O computes it, equals P on
+every state the other rules admit.
+
+In these terms (IM §2):
+
+- **X1** violates **I-out** with O faithful, complete and
+  observer-current. Faithful + complete + current is therefore not
+  enough. A self-referential observer can be relied on for Deny (the
+  broken-module control), not for Allow.
+- **X4** violates **decision currency**, not independence. The writer
+  was the actor's leftover process; every observer was valid for the S1
+  it judged.
+- **I-eff** (the observer's own execution changing the live state, G′)
+  is not measured by any report.
+
+### 10.2 What v9r enforces, and what it assumes
+
+v9r enforces **which** observer may answer **which** request about
+**which** state: registration, `restrict`, binding of each answer to
+its request (G7), claims never counting, and Blocked when two
+registered observers disagree. It enforces faithfulness and
+completeness only for its own content-addressed derivations (a claimed
+tree id is recomputed; an omitted directory or unreadable file blocks),
+and decision currency only at the start of execution.
+
+Everything else is assumed (IM §4):
+
+| Property | Status |
+|---|---|
+| faithful, complete (raw observers) | assumption; a lone liar, a caching observer and an omitted file each give a false Allow (measured) |
+| decision currency at completion | assumption; X4 measured it failing, 40/40 |
+| independence, I-out | assumption; X1 measured it failing |
+| independence, I-eff | assumption, unmeasured |
+| adequacy | assumption, held by the rule's author |
+
+> v9r establishes **which** registered observer answered **which**
+> request about **which** state. It does not establish that the answer
+> is a faithful, complete, current or independent function of that
+> state, except for faithfulness and completeness of content-addressed
+> derivations. (IM §4)
+
+### 10.3 Independence reduces to execution provenance
+
+- The kernel cannot carry independence as a condition on an existing
+  `Fact`: `Requirement::Fact` has no observer field, and provenance is
+  used only to format the reason (`kernel.rs:292`, `kernel.rs:491`).
+- A separate fact `independent(O, k)` is expressible, but would itself
+  be attested by some O′; the regress ends in a registration-time
+  assumption.
+- `Within` over an execution record of O has the right shape (the
+  judged files O executed ∩ the judged tree = ∅), but no observer
+  supplies that record.
+
+So independence, like the writer of S1
+([causality](causality.md)), needs evidence about an execution, and v9r
+has none (IM §5). This is one gap, not two.
+
+### 10.4 Authority is not influence
+
+CB splits independence along a measured line:
+
+- **I-eff is an authority property**, `watched ∩ mutable(O) = ∅`. Its
+  components (a world built from a manifest, object identity by file
+  handle, a view materialized from the snapshot, containment of
+  delegated writers) were each measured as constructible in archived
+  experiments, with residue: the same-uid namespace owner (detected, not
+  prevented), supplementary groups, harness tools.
+- **I-out is not an authority property.** X1 used only the authority
+  any test runner needs: read the checkout, run the interpreter. In the
+  trusted, capability-scoped and isolated observer models alike, X1 is
+  Allow.
+
+Capability checks bound what an observer can **touch**, not what
+**controls its output**.
+
+### 10.5 Not yet separated
+
+No measurement varies observer validity with S1 held fixed: X1 moved
+state validity and observer validity together. IM §6.3 defines the
+smallest experiment that would (the X1 state fixed; an executing and a
+data-only observer × an actor and an outsider writer; four cells). It
+has **not** been run.
