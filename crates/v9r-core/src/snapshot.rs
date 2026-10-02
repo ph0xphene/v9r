@@ -10,11 +10,11 @@
 //!   RawFsObserver ── readdir / lstat / read / readlink ──┐   (the only trusted observation)
 //!                                                         ▼
 //!   FsSnapshot (verifier) ── builds objects ── ObjectStore ── snapshot(dir) = root
+//!                                     └── same walk ──────────── snapshot_entries(dir)
 //!                                                         │
 //!   SnapshotObjects (verifier) ◀── snap_object(id) ───────┘   (pure: every object checked by id)
 //!     snapshot_valid(root), snapshot_digest(root, def)
 //!   MatchesSnapshot(def)        matches_snapshot(dir, approved)
-//!   SnapshotCommitEquality      snapshot_matches_commit(root, repo, commit)
 //! ```
 //!
 //! After a snapshot exists, nothing about it needs an observer: anyone may
@@ -345,6 +345,12 @@ pub struct Capture {
 
 /// Derives `snapshot(dir)` = root tree id from primitive observations,
 /// storing the objects. The one step that rests on an observer.
+///
+/// From the same walk it also derives `snapshot_entries(dir)`: a `Map`
+/// of every entry below `dir` (root-relative path) to `40000` for a
+/// directory (empty ones included, which the tree id omits, as git does)
+/// or `<mode> <blob id>` for a file or symlink. It rests on exactly the
+/// observations the tree id rests on.
 pub struct FsSnapshot {
     store: ObjectStore,
     capture: Capture,
@@ -369,12 +375,15 @@ impl Walker<'_> {
     }
 }
 
-/// A finished walk: root tree (`None` if no files), what it rests on, and
-/// every path whose metadata was taken.
+/// A finished walk: root tree (`None` if no files), what it rests on,
+/// every path whose metadata was taken, and every entry it saw.
 struct Built {
     root: Option<String>,
     basis: Vec<Basis>,
     paths: Vec<String>,
+    /// Root-relative path → `40000` (directory, empty ones included) or
+    /// `<mode> <blob id>` (file or symlink), as stored by this walk.
+    entries: BTreeMap<String, String>,
 }
 
 /// Take `key` in order: `Need` it alone if absent.
@@ -478,6 +487,7 @@ impl FsSnapshot {
             }
         }
         let mut entries = Vec::new();
+        let mut seen = BTreeMap::new();
         let mut need = Vec::new();
         for (name, mode) in &listing {
             let path = format!("{dir}/{name}");
@@ -486,6 +496,8 @@ impl FsSnapshot {
                     Walk::Done(sub) => {
                         basis.extend(sub.basis);
                         paths.extend(sub.paths);
+                        seen.extend(sub.entries);
+                        seen.insert(path.clone(), mode.clone());
                         match sub.root {
                             Some(id) => id,
                             None => continue,
@@ -522,6 +534,9 @@ impl FsSnapshot {
                 }
                 other => return Walk::Fail(format!("{path}: mode {other} not representable")),
             };
+            if mode != "40000" {
+                seen.insert(path.clone(), format!("{mode} {id}"));
+            }
             entries.push((mode.clone(), name.clone(), id));
         }
         if !need.is_empty() {
@@ -532,6 +547,7 @@ impl FsSnapshot {
                 root: None,
                 basis,
                 paths,
+                entries: seen,
             });
         }
         // git's order: names compared as if trees ended in '/'.
@@ -551,6 +567,7 @@ impl FsSnapshot {
             root: Some(self.store.put("tree", &body)),
             basis,
             paths,
+            entries: seen,
         })
     }
 
@@ -561,7 +578,13 @@ impl FsSnapshot {
             .unwrap_or_else(|| self.store.put("tree", b""))
     }
 
-    fn capture(&self, inputs: &Inputs, dir: &str) -> Result<(String, Vec<Basis>), Step> {
+    /// The root id of `dir`, what it rests on, and the entries of the walk
+    /// that produced it.
+    fn capture(
+        &self,
+        inputs: &Inputs,
+        dir: &str,
+    ) -> Result<(String, Vec<Basis>, BTreeMap<String, String>), Step> {
         let c = self.capture;
         let plain = !(c.double_walk || c.recheck || c.watch);
         // One session per capture: reuse the one already in the inputs.
@@ -646,7 +669,7 @@ impl FsSnapshot {
                 _ => return Err(Step::Incomplete("change journal unavailable".into())),
             }
         }
-        Ok((root, basis))
+        Ok((root, basis, built.entries))
     }
 }
 
@@ -656,13 +679,17 @@ impl Verifier for FsSnapshot {
     }
 
     fn derives(&self, key: &Key) -> bool {
-        key.kind == "snapshot" && key.args.len() == 1
+        matches!(key.kind.as_str(), "snapshot" | "snapshot_entries") && key.args.len() == 1
     }
 
     fn step(&self, key: &Key, inputs: &Inputs) -> Step {
         match self.capture(inputs, &key.args[0]) {
-            Ok((root, basis)) => Step::Derived {
-                value: Term::Id(root),
+            Ok((root, basis, entries)) => Step::Derived {
+                value: if key.kind == "snapshot" {
+                    Term::Id(root)
+                } else {
+                    Term::Map(entries)
+                },
                 basis,
             },
             Err(step) => step,
@@ -787,44 +814,5 @@ impl Verifier for MatchesSnapshot {
             Term::Bool(a == b)
         };
         Step::Derived { value, basis }
-    }
-}
-
-/// `snapshot_matches_commit(root, repo, commit)`: a stored snapshot has the
-/// content of a git commit. No observer is involved on either side.
-pub struct SnapshotCommitEquality;
-
-impl Verifier for SnapshotCommitEquality {
-    fn id(&self) -> &str {
-        "snapshot-commit-equality"
-    }
-
-    fn derives(&self, key: &Key) -> bool {
-        key.kind == "snapshot_matches_commit" && key.args.len() == 3
-    }
-
-    fn step(&self, key: &Key, inputs: &Inputs) -> Step {
-        let mut basis = Vec::new();
-        let a = take!(
-            derived(
-                inputs,
-                &Key::new("snapshot_digest", [key.args[0].as_str(), MANIFEST])
-            ),
-            basis
-        );
-        let b = take!(
-            derived(
-                inputs,
-                &Key::new(
-                    "tree_digest",
-                    [key.args[1].as_str(), &key.args[2], MANIFEST]
-                )
-            ),
-            basis
-        );
-        Step::Derived {
-            value: Term::Bool(a == b),
-            basis,
-        }
     }
 }

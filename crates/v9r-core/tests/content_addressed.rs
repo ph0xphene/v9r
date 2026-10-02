@@ -12,14 +12,10 @@ use std::sync::Once;
 
 use uuid::Uuid;
 use v9r_core::fs_raw::RawFsObserver;
-use v9r_core::git::GitRepo;
-use v9r_core::git_provider::GitEvidenceProvider;
 use v9r_core::graph::{self, Answer, Attestor, EvidenceProvider, Key, Registry, Term, Trust};
 use v9r_core::kernel::{Evidence, Invariant, Obligation, Phase, Requirement, Strength, Verdict};
-use v9r_core::snapshot::{
-    FsSnapshot, MatchesSnapshot, ObjectStore, SnapshotCommitEquality, SnapshotObjects, IDENTITY,
-};
-use v9r_core::verifiers::{GitObjects, MANIFEST};
+use v9r_core::snapshot::{FsSnapshot, MatchesSnapshot, ObjectStore, SnapshotObjects, IDENTITY};
+use v9r_core::verifiers::MANIFEST;
 
 // ------------------------------------------------------------ invariant
 
@@ -135,8 +131,6 @@ impl Env {
         registry.register(self.store.clone(), Trust::ClaimsOnly);
         registry.add_verifier(FsSnapshot::new(self.store.clone()));
         registry.add_verifier(SnapshotObjects);
-        registry.add_verifier(GitObjects);
-        registry.add_verifier(SnapshotCommitEquality);
         for def in defs {
             registry.add_verifier(MatchesSnapshot::new(def));
         }
@@ -227,52 +221,28 @@ async fn artifact_matching_the_approved_snapshot_is_allowed() {
 
 #[tokio::test]
 async fn a_snapshot_is_the_git_tree_of_the_same_content() {
+    // Debloat Phase 1: the SHA-1 and `snapshot_matches_commit` halves of
+    // this test went with the git domain (tag v9r-archive-v0). What stays
+    // is the claim's state identity: git itself computes the same id.
     let env = Env::new("git-model");
     let approved = env.approve();
-    for format in ["sha256", "sha1"] {
-        let repo = env.base.join(format!("repo-{format}"));
-        fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q", &format!("--object-format={format}")]);
-        populate(&repo);
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-q", "-m", "release"]);
-        let commit = git(&repo, &["rev-parse", "HEAD"]);
-        let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
-        if format == "sha256" {
-            // Same content, same object: git computes the snapshot's id.
-            assert_eq!(tree, approved);
-        }
-        let registry = env.registry();
-        registry.register(
-            GitEvidenceProvider::new(
-                "git",
-                &env.base,
-                vec![GitRepo {
-                    path: format!("repo-{format}"),
-                    bare: false,
-                }],
-            ),
-            Trust::ClaimsOnly,
-        );
-        let key = Key::new(
-            "snapshot_matches_commit",
-            [approved.as_str(), &format!("repo-{format}"), &commit],
-        );
-        let (value, _, basis) = verified(&registry, &key).unwrap();
-        assert_eq!(value, Term::Bool(true), "{format}");
-        // Relating a filesystem snapshot to a commit needs no observer.
-        assert!(
-            basis.ends_with("trusts verifier:git-objects, verifier:snapshot-objects"),
-            "{basis}"
-        );
-        let inner = verified(
-            &registry,
-            &Key::new("snapshot_digest", [approved.as_str(), MANIFEST]),
-        )
-        .unwrap()
-        .2;
-        assert!(inner.ends_with("trusts no observer"), "{inner}");
-    }
+    let repo = env.base.join("repo-sha256");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "--object-format=sha256"]);
+    populate(&repo);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "release"]);
+    let tree = git(&repo, &["rev-parse", "HEAD^{tree}"]);
+    // Same content, same object: git computes the snapshot's id.
+    assert_eq!(tree, approved);
+    let registry = env.registry();
+    let inner = verified(
+        &registry,
+        &Key::new("snapshot_digest", [approved.as_str(), MANIFEST]),
+    )
+    .unwrap()
+    .2;
+    assert!(inner.ends_with("trusts no observer"), "{inner}");
 }
 
 // ------------------------------------------------------------ DENY
@@ -347,7 +317,7 @@ async fn unreadable_file_makes_the_snapshot_incomplete() {
 #[tokio::test]
 async fn approved_snapshot_with_a_lost_or_altered_object_is_incomplete() {
     // The blob of src/lib.txt as approved.
-    let victim = v9r_core::state::ContentHash::of(b"blob 8\0library\n").to_hex();
+    let victim = v9r_core::content::ContentHash::of(b"blob 8\0library\n").to_hex();
     for mode in ["lost", "altered"] {
         let env = Env::new(mode);
         let approved = env.approve();

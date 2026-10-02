@@ -1,39 +1,17 @@
 //! v9r-core: shared types for the v9r workspace.
 
-pub mod adapter;
-pub mod authority;
-pub mod bundle;
-pub mod capability;
 pub mod content;
-pub mod context;
 pub mod counter;
-pub mod delegation;
-pub mod effect;
-pub mod execution;
-pub mod facts;
-pub mod fs_provider;
 pub mod fs_raw;
 pub mod fs_watch;
-pub mod git;
-pub mod git_guard;
-pub mod git_provider;
 pub mod graph;
-pub mod guarded;
 pub mod kernel;
-pub mod manifest;
-pub mod object_identity;
-pub mod policy;
 pub mod provenance;
 pub mod runtime;
 pub mod snapshot;
-pub mod state;
-pub mod task;
 pub mod temporal;
-pub mod trace;
-pub mod trusted;
 pub mod verifiers;
 pub mod verify;
-pub mod vfs;
 
 use std::fmt;
 

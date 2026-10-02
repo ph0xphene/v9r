@@ -119,6 +119,24 @@ impl fmt::Debug for Term {
 }
 
 pub type GraphFact = Fact<Key, Term>;
+/// Evidence over keys. Code outside the crate can build and read it, but
+/// cannot relabel it: relabeling verified evidence is attesting it.
+///
+/// ```
+/// let e = v9r_core::graph::GraphEvidence::new();
+/// let _ = e.get(&v9r_core::graph::Key::new("k", ["a"]));
+/// ```
+///
+/// ```compile_fail
+/// // The same evidence base; only `map` is crate-private.
+/// let e = v9r_core::graph::GraphEvidence::new();
+/// let _ = e.map(|s| s.clone(), |v| v.clone());
+/// ```
+///
+/// (Debloat Phase 1: this replaces the `compile_fail` example on
+/// `kernel::EvidenceBase::map`, which names the removed
+/// `v9r_core::facts` and so now fails for the wrong reason. `kernel.rs`
+/// is frozen, so the stale example stays there.)
 pub type GraphEvidence = EvidenceBase<Key, Term>;
 
 // ------------------------------------------------------------ providers

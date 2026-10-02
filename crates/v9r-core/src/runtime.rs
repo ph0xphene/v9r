@@ -414,12 +414,6 @@ where
         self.durable.add_proposed(fact);
     }
 
-    /// Add evidence assembled by trusted code. Crate-private: `evidence`
-    /// may hold verified entries.
-    pub(crate) fn absorb(&mut self, evidence: &DomainEvidence<D>) {
-        self.durable.merge(evidence);
-    }
-
     /// Derive and evaluate PRE obligations against the trusted state.
     /// Only `Allow` yields authority.
     pub async fn authorize(&mut self, proposal: D::Proposal) -> Result<Authorize<D>, D::Error> {

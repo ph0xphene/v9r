@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use v9r_core::fs_provider::FilesystemEvidenceProvider;
 use v9r_core::fs_raw::RawFsObserver;
 use v9r_core::graph::{Answer, Attestor, EvidenceProvider, Key, Registry, Term, Trust};
 use v9r_core::kernel::{
@@ -128,10 +127,10 @@ impl TransitionInvariant<Task> for OnlySrc {
         "I2"
     }
     fn watches(&self) -> Vec<Key> {
-        vec![key("entries", "ws")]
+        vec![key("snapshot_entries", "ws")]
     }
     fn post(&self, t: &Transition<'_, Task>) -> Vec<TObligation> {
-        let k = key("entries", "ws");
+        let k = key("snapshot_entries", "ws");
         let (p0, e0) = pin(self.id(), t.before, &k);
         let mut out = vec![p0];
         let e1 = t.after.and_then(|a| {
@@ -233,7 +232,6 @@ impl Lab {
     fn registry(&self, runner: bool) -> Registry {
         let r = Registry::new();
         r.register(RawFsObserver::new("raw", &self.base), Trust::Attesting);
-        r.register(FilesystemEvidenceProvider::new("fs", &self.base), Trust::Attesting);
         for kind in ["fs_file", "fs_link"] {
             r.restrict(kind, &["raw"]);
         }
@@ -383,8 +381,8 @@ async fn run(n: usize, r: Run) -> String {
     println!("  evidence collected by v9r:");
     println!("    S1        {}   (tree id of the result)", short(&s1));
     let files = changed_files(
-        receipt.before.verified(&key("entries", "ws")),
-        after.and_then(|a| a.verified(&key("entries", "ws"))),
+        receipt.before.verified(&key("snapshot_entries", "ws")),
+        after.and_then(|a| a.verified(&key("snapshot_entries", "ws"))),
     );
     println!(
         "    changed   {}",
@@ -411,17 +409,9 @@ async fn run(n: usize, r: Run) -> String {
     verdict
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if Command::new("python3").arg("-c").arg("0").status().is_err() {
-        eprintln!("python3 is needed to run the protected test");
-        std::process::exit(2);
-    }
-    println!("LLM proposes. v9r decides.\n");
-    println!("repository   src/greet.py, tests/test_greet.py (failing)");
-    println!("policy       {POLICY}");
-
-    let runs = vec![
+/// The five scripted runs and the verdict each is designed to get.
+fn scenarios() -> Vec<(Run, &'static str)> {
+    vec![
         (
             Run {
                 title: "honest fix",
@@ -477,14 +467,32 @@ async fn main() {
             },
             "REFUSED",
         ),
-    ];
+    ]
+}
 
+/// Play every scenario: (title, designed verdict, verdict v9r reached).
+async fn play() -> Vec<(&'static str, &'static str, String)> {
     let mut summary = Vec::new();
-    for (i, (r, expected)) in runs.into_iter().enumerate() {
+    for (i, (r, expected)) in scenarios().into_iter().enumerate() {
         let title = r.title;
         let got = run(i + 1, r).await;
         summary.push((title, expected, got));
     }
+    summary
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if Command::new("python3").arg("-c").arg("0").status().is_err() {
+        eprintln!("python3 is needed to run the protected test");
+        std::process::exit(2);
+    }
+    println!("LLM proposes. v9r decides.\n");
+    println!("repository   src/greet.py, tests/test_greet.py (failing)");
+    println!("policy       {POLICY}");
+
+    let summary = play().await;
     println!("\n━━━ Summary ━━━");
     let mut ok = true;
     for (title, expected, got) in &summary {
@@ -495,5 +503,20 @@ async fn main() {
     println!("\nThe agent's words never counted. Every decision came from what v9r observed.");
     if !ok {
         std::process::exit(1);
+    }
+}
+
+/// `cargo test` runs the demo too (`test = true` in Cargo.toml): every
+/// run must reach the verdict it was designed for.
+#[cfg(test)]
+mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn demo_reaches_its_five_designed_verdicts() {
+        let summary = super::play().await;
+        let got: Vec<&str> = summary.iter().map(|(_, _, got)| got.as_str()).collect();
+        assert_eq!(got, ["ALLOW", "DENY", "BLOCKED", "DENY", "REFUSED"]);
+        for (title, expected, got) in &summary {
+            assert_eq!(expected, got, "{title}");
+        }
     }
 }

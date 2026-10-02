@@ -8,4 +8,3 @@ v9r-core = { workspace = true }
 v9r-vfs = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
-tracing = { workspace = true }

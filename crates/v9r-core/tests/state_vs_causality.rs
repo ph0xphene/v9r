@@ -14,7 +14,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use v9r_core::fs_provider::FilesystemEvidenceProvider;
 use v9r_core::fs_raw::RawFsObserver;
 use v9r_core::graph::{Key, Registry, Term, Trust};
 use v9r_core::kernel::{Obligation, Phase, Requirement, Status, Strength, Verdict};
@@ -82,10 +81,10 @@ impl TransitionInvariant<Task> for WithinScope {
         "I2.changes_within_scope"
     }
     fn watches(&self) -> Vec<Key> {
-        vec![key("entries", "ws")]
+        vec![key("snapshot_entries", "ws")]
     }
     fn post(&self, t: &Transition<'_, Task>) -> Vec<TObligation> {
-        let k = key("entries", "ws");
+        let k = key("snapshot_entries", "ws");
         let (p0, e0) = pin(self.id(), t.before, &k);
         let mut out = vec![p0];
         let e1 = t.after.and_then(|a| {
@@ -183,10 +182,6 @@ impl Lab {
     fn registry(&self) -> Registry {
         let r = Registry::new();
         r.register(RawFsObserver::new("raw", &self.base), Trust::Attesting);
-        r.register(
-            FilesystemEvidenceProvider::new("fs", &self.base),
-            Trust::Attesting,
-        );
         for kind in ["fs_file", "fs_link"] {
             r.restrict(kind, &["raw"]);
         }
@@ -369,4 +364,147 @@ async fn state_vs_causality() {
     assert!(same_bytes, "the two worlds must end byte-identical");
     assert_eq!(a.s0, b.s0);
     assert_eq!(a.post, Verdict::Allow, "World A must satisfy every invariant");
+}
+
+// ------------------------------------------------------------ regression: whole decisions
+
+/// The serialized decisions of one world: PRE (the authorization), POST
+/// and the journal, with every value that is only a counter replaced by
+/// its role. What remains is everything the verifier decided and why.
+#[derive(Debug, PartialEq)]
+struct Decided {
+    pre: String,
+    post: String,
+    journal: String,
+    post_verdict: Verdict,
+}
+
+/// Replace the run's counters by roles: the two snapshot ids and the
+/// effect's clock reading (as `At::Snapshot` subjects, `@s<n>` in reasons
+/// and the `transition` key), and lineage ids (`lineage:L<n>`).
+fn normalize(json: &str, before: u64, done: u64, after: u64) -> String {
+    let mut s = json.to_string();
+    for (n, role) in [(before, "BEFORE"), (after, "AFTER")] {
+        s = s.replace(&format!("{{\"snapshot\":{n}}}"), &format!("{{\"snapshot\":\"{role}\"}}"));
+        s = s.replace(&format!("@s{n} "), &format!("@s{role} "));
+    }
+    s = s.replace(
+        &format!("\"args\":[\"{before}\",\"{done}\",\"{after}\"]"),
+        "\"args\":[\"BEFORE\",\"DONE\",\"AFTER\"]",
+    );
+    s = s.replace(
+        &format!("transition({before}, {done}, {after})"),
+        "transition(BEFORE, DONE, AFTER)",
+    );
+    let mut out = String::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.find("lineage:L") {
+        out.push_str(&rest[..i + "lineage:L".len()]);
+        rest = rest[i + "lineage:L".len()..].trim_start_matches(|c: char| c.is_ascii_digit());
+        out.push('#');
+    }
+    out.push_str(rest);
+    // Nothing that names a moment may survive normalization.
+    assert!(!out.contains("{\"snapshot\":") || !out
+        .split("{\"snapshot\":")
+        .skip(1)
+        .any(|t| t.starts_with(|c: char| c.is_ascii_digit())), "{out}");
+    out
+}
+
+/// The normalized decisions, and the raw POST decision for comparison.
+async fn decide<A: Actor<Task>>(lab: &Lab, actor: A) -> (Decided, String) {
+    let s0 = lab.s0();
+    let mut rt = temporal::runtime(lab.registry(), invariants(&s0), actor);
+    let Authorize::Allowed(auth) = rt.authorize(Task).await.unwrap() else {
+        panic!("PRE")
+    };
+    let pre = auth.decision().clone();
+    let report = rt.execute(*auth).await.unwrap();
+    assert!(report.executed);
+    let receipt = report.receipt.as_ref().unwrap();
+    let (before, done, after) = (
+        receipt.before.id(),
+        receipt.done,
+        receipt.after.as_ref().expect("observed after").id(),
+    );
+    let json = |v: &dyn erased::Json| normalize(&v.json(), before, done, after);
+    let decided = Decided {
+        pre: json(&pre),
+        post: json(&report.decision),
+        journal: json(&rt.journal().records()),
+        post_verdict: report.decision.verdict,
+    };
+    (decided, erased::Json::json(&report.decision))
+}
+
+/// Serialize any decision-like value (keeps `decide` free of the long
+/// runtime type names).
+mod erased {
+    pub trait Json {
+        fn json(&self) -> String;
+    }
+    impl<T: serde::Serialize> Json for T {
+        fn json(&self) -> String {
+            serde_json::to_string(self).unwrap()
+        }
+    }
+}
+
+/// World B's actor, wired to an outsider that writes `bytes`.
+fn outsider(lab: &Lab, bytes: &'static [u8]) -> (Bystander, std::thread::JoinHandle<()>) {
+    let (start_tx, start_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let target = lab.base.join("ws/src/greet.py");
+    let handle = std::thread::spawn(move || {
+        start_rx.recv().unwrap();
+        fs::write(&target, bytes).unwrap();
+        done_tx.send(()).unwrap();
+    });
+    (
+        Bystander {
+            start: start_tx,
+            done: done_rx,
+        },
+        handle,
+    )
+}
+
+/// Regression for the State vs Causality boundary: from the same S0, an
+/// authorized transition and an unauthorized writer of byte-identical S1
+/// get identical decisions: the whole PRE and POST decisions and the
+/// journal, every finding and every reason, not a projection of them.
+/// A third world, where the outsider writes different bytes, shows the
+/// comparison would see a difference.
+#[tokio::test]
+async fn identical_s1_gets_identical_decisions_whoever_wrote_it() {
+    let lab_a = Lab::new("reg-a");
+    let (a, raw_a) = decide(&lab_a, Agent {
+        ws: lab_a.base.join("ws"),
+    })
+    .await;
+
+    let lab_b = Lab::new("reg-b");
+    let (bystander, handle) = outsider(&lab_b, S1_GREET);
+    let (b, raw_b) = decide(&lab_b, bystander).await;
+    handle.join().unwrap();
+
+    assert_eq!(tree_of(&lab_a.base.join("ws")), tree_of(&lab_b.base.join("ws")));
+    assert_eq!(a.post_verdict, Verdict::Allow, "{}", a.post);
+    assert_eq!(a.pre, b.pre, "PRE decisions differ");
+    assert_eq!(a.post, b.post, "POST decisions differ");
+    assert_eq!(a.journal, b.journal, "journals differ");
+    assert_eq!(a, b);
+    // The raw decisions do differ, in counters only: normalization is
+    // what makes them equal, and it replaced nothing but counters.
+    assert_ne!(raw_a, raw_b);
+
+    // Control: an outsider writing *other* bytes is not normalized away.
+    let lab_c = Lab::new("reg-c");
+    let (bystander, handle) = outsider(&lab_c, b"def greet(n):\n    return n\n");
+    let (c, _) = decide(&lab_c, bystander).await;
+    handle.join().unwrap();
+    assert_eq!(a.pre, c.pre, "same S0, same PRE");
+    assert_eq!(c.post_verdict, Verdict::Deny, "{}", c.post);
+    assert_ne!(a.post, c.post);
 }

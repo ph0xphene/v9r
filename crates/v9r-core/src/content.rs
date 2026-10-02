@@ -15,9 +15,10 @@
 //! * anything else (special files, git submodules) makes the tree
 //!   non-representable: no manifest, hence no fact.
 
-use serde::Serialize;
+use std::fmt;
 
-use crate::state::{ContentHash, EntryKind, FsState};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 
 /// Name of this normal form, for provenance: two digests are comparable
 /// only if both were computed by it.
@@ -43,52 +44,54 @@ pub fn digest(mut items: Vec<Item>) -> ContentHash {
     ContentHash::of(&serde_json::to_vec(&items).expect("manifest serialization is infallible"))
 }
 
-/// Content manifest of the subtree `dir` ("" for the whole state),
-/// skipping any top-level names in `exclude`. `None` if part of the
-/// subtree is unobserved, contains special files, or `dir` is not a
-/// directory.
-pub fn from_fs_state(state: &FsState, dir: &str, exclude: &[&str]) -> Option<ContentHash> {
-    if !dir.is_empty() && state.get(dir).map(|e| e.kind) != Some(EntryKind::Dir) {
-        return None;
+/// SHA-256 of a byte string. Serialized as `"sha256:<hex>"`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContentHash([u8; 32]);
+
+impl ContentHash {
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
     }
-    let prefix = if dir.is_empty() {
-        String::new()
-    } else {
-        format!("{dir}/")
-    };
-    let excluded =
-        |relative: &str| exclude.contains(&relative.split('/').next().unwrap_or_default());
-    if state.unobserved_cover(dir).is_some()
-        || state.unobserved().iter().any(|u| {
-            u.path
-                .strip_prefix(&prefix)
-                .is_some_and(|relative| !excluded(relative))
-        })
-    {
-        return None;
+
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
-    let mut items = Vec::new();
-    for (path, entry) in state.entries() {
-        let Some(relative) = path.strip_prefix(&prefix) else {
-            continue;
-        };
-        if excluded(relative) {
-            continue;
+
+    fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 64 {
+            return None;
         }
-        let (kind, sha256) = match entry.kind {
-            EntryKind::Dir => continue,
-            EntryKind::File => (ItemKind::File, entry.sha256?),
-            EntryKind::Symlink => (
-                ItemKind::Symlink,
-                ContentHash::of(entry.link_target.as_deref()?.as_bytes()),
-            ),
-            EntryKind::Other => return None,
-        };
-        items.push(Item {
-            path: relative.to_string(),
-            kind,
-            sha256,
-        });
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(Self(out))
     }
-    Some(digest(items))
+}
+
+impl fmt::Debug for ContentHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sha256:{}", self.to_hex())
+    }
+}
+
+impl fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sha256:{}", self.to_hex())
+    }
+}
+
+impl Serialize for ContentHash {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentHash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.strip_prefix("sha256:")
+            .and_then(Self::from_hex)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid content hash: {s}")))
+    }
 }

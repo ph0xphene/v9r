@@ -4,21 +4,20 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
-async-trait = { workspace = true }
-bincode = { workspace = true }
-chrono = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-ring = { workspace = true }
-sha1 = { workspace = true }
 slotmap = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
 tokio = { workspace = true }
-tracing = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+# The demo is also a test: `cargo test` asserts its five verdicts.
+[[example]]
+name = "v9r_demo"
+test = true
