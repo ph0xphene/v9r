@@ -86,7 +86,7 @@ v9r
 The model-free demo exercises the core trust boundary without credentials or a provider:
 
 ```sh
-cargo run --locked --manifest-path examples/task-runtime/Cargo.toml
+cargo run --manifest-path examples/task-runtime/Cargo.toml
 ```
 
 It shows an allowed write, a rejected parent-traversal declaration, and rollback to the checkpoint. See [`examples/task-runtime/README.md`](examples/task-runtime/README.md) for expected output and limits.

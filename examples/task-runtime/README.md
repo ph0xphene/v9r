@@ -3,7 +3,7 @@
 This deterministic example needs Rust stable and `cp` on Linux/macOS. No model, credentials, or network service is required (Cargo may download dependencies).
 
 ```bash
-cargo run --locked --manifest-path examples/task-runtime/Cargo.toml
+cargo run --manifest-path examples/task-runtime/Cargo.toml
 ```
 
 The program creates a disposable directory under `TMPDIR` and demonstrates:
