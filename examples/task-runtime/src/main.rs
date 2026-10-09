@@ -19,12 +19,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&workdir)?;
         fs::write(workdir.join("state.txt"), b"clean\n")?;
+        fs::write(workdir.join("dirty.txt"), b"dirty\n")?;
     }
 
     let manifest = Manifest {
         allow_read: vec![workdir.clone()],
         allow_write: vec![workdir.clone()],
-        allow_exec: vec!["sh".to_string()],
+        allow_exec: vec!["cp".to_string()],
         token_limit: 4096,
         max_steps: 16,
         timeout_ms: 30_000,
@@ -58,9 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_task_step(
         &mut task,
         CommandSpec {
-            program: "sh".to_string(),
-            args: vec!["-c".to_string(), "printf 'dirty\n' > state.txt".to_string()],
-            cwd: Some(workdir.clone()),
+            program: "cp".to_string(),
+            args: vec!["dirty.txt".to_string(), "state.txt".to_string()],
+            cwd: None,
             reads: Vec::new(),
             writes: vec![PathBuf::from("state.txt")],
         },
@@ -79,12 +80,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bad_write = run_task_step(
         &mut task,
         CommandSpec {
-            program: "sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'escaped\n' > ../escape.txt".to_string(),
-            ],
-            cwd: Some(workdir.clone()),
+            program: "cp".to_string(),
+            args: vec!["dirty.txt".to_string(), "state.txt".to_string()],
+            cwd: None,
             reads: Vec::new(),
             writes: vec![PathBuf::from("../escape.txt")],
         },
