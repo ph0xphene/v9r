@@ -21,11 +21,11 @@
 //!
 //! Host imports under module name `v9r`:
 //! - `vfs_read(path_ptr, path_len, buf_ptr, buf_max) -> i32`
-//!     >= 0: bytes written to buf; -1 not found; -2 perm denied; -3 other; -4 buf too small
+//!   >= 0: bytes written to buf; -1 not found; -2 perm denied; -3 other; -4 buf too small
 //! - `vfs_write(path_ptr, path_len, data_ptr, data_len) -> i32`
-//!     0 ok; -1 not found; -2 perm denied; -3 other
+//!   0 ok; -1 not found; -2 perm denied; -3 other
 //! - `vfs_http_request(url_ptr, url_len, body_ptr, body_len, res_ptr, res_max) -> i32`
-//!     >= 0: response bytes written; -2 perm denied; -3 invalid input; -5 network; -6 too large; -7 empty; -8 missing auth/config
+//!   >= 0: response bytes written; -2 perm denied; -3 invalid input; -5 network; -6 too large; -7 empty; -8 missing auth/config
 //!
 //! ## Logs
 //! WASI stdout + stderr are backed by the agent's mounted `LogBuffer`.
@@ -315,10 +315,10 @@ fn run_wasm(
         });
     if let Some(log) = &log {
         let stdout = LogOutput {
-            log: Arc::clone(&log),
+            log: Arc::clone(log),
         };
         let stderr = LogOutput {
-            log: Arc::clone(&log),
+            log: Arc::clone(log),
         };
         wasi_builder.stdout(stdout).stderr(stderr);
     }
