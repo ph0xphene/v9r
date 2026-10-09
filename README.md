@@ -1,5 +1,7 @@
 # v9r
 
+> **Status:** Research release. Linux and macOS are exercised by CI; review the support boundary before relying on host-level behavior.
+
 **The Transactional Shell for AI Tasks.**
 
 **Snapshot** the workspace before any work starts.  
