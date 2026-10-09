@@ -637,12 +637,8 @@ async fn apply_write(
         })
         .await?;
     if !allowed {
-        return deny_write_action(
-            task,
-            trace,
-            format!("write denied: {}", resolved.display()),
-        )
-        .await;
+        return deny_write_action(task, trace, format!("write denied: {}", resolved.display()))
+            .await;
     }
 
     // Ensure the parent directory exists. We do this BEFORE the symlink
@@ -665,20 +661,18 @@ async fn apply_write(
     // the destination and the workdir, and require the parent to live
     // under the canonicalized workdir.
     let parent_for_real = resolved.parent().unwrap_or_else(|| Path::new("."));
-    let parent_real =
-        tokio::fs::canonicalize(parent_for_real)
-            .await
-            .map_err(|source| AdapterError::Io {
-                path: parent_for_real.to_path_buf(),
-                source,
-            })?;
-    let workdir_real =
-        tokio::fs::canonicalize(&task.workdir)
-            .await
-            .map_err(|source| AdapterError::Io {
-                path: task.workdir.clone(),
-                source,
-            })?;
+    let parent_real = tokio::fs::canonicalize(parent_for_real)
+        .await
+        .map_err(|source| AdapterError::Io {
+            path: parent_for_real.to_path_buf(),
+            source,
+        })?;
+    let workdir_real = tokio::fs::canonicalize(&task.workdir)
+        .await
+        .map_err(|source| AdapterError::Io {
+            path: task.workdir.clone(),
+            source,
+        })?;
     if !parent_real.starts_with(&workdir_real) {
         return deny_write_action(
             task,
@@ -787,11 +781,7 @@ pub(crate) async fn write_atomic_to(dst: &Path, content: &[u8]) -> std::io::Resu
 /// Record a write-action violation: status, trace, fs block, finish event.
 /// Returns the corresponding `AdapterError::Violation` for the caller to
 /// propagate. `is_security_violation` then routes this to rollback.
-async fn deny_write_action(
-    task: &mut Task,
-    trace: &TraceLogger,
-    reason: String,
-) -> Result<()> {
+async fn deny_write_action(task: &mut Task, trace: &TraceLogger, reason: String) -> Result<()> {
     task.status = TaskStatus::Violation;
     trace
         .log_event(TaskEvent::ViolationOccurred {

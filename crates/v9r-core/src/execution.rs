@@ -217,8 +217,18 @@ fn command_line(command: &CommandSpec) -> String {
 /// exec allowlist; once `sh` is allowlisted, *every* shell payload
 /// runs. The manifest cannot opt back into this list.
 const SHELL_DENYLIST: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash",
-    "powershell", "pwsh", "cmd",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "fish",
+    "ash",
+    "powershell",
+    "pwsh",
+    "cmd",
 ];
 
 fn has_forbidden_control_char(s: &str) -> bool {
@@ -331,9 +341,22 @@ mod tests {
     #[test]
     fn rejects_shells_even_with_exe_suffix() {
         for sh in [
-            "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "ash",
-            "pwsh", "powershell", "cmd",
-            "Bash", "ZSH", "Bash.exe", "pwsh.exe",
+            "sh",
+            "bash",
+            "zsh",
+            "dash",
+            "ksh",
+            "csh",
+            "tcsh",
+            "fish",
+            "ash",
+            "pwsh",
+            "powershell",
+            "cmd",
+            "Bash",
+            "ZSH",
+            "Bash.exe",
+            "pwsh.exe",
         ] {
             let err = validate_command_spec(&spec(sh, &["-c", "echo hi"])).unwrap_err();
             assert!(
@@ -374,7 +397,12 @@ mod tests {
     #[test]
     fn rejects_parent_traversal() {
         for bad in [
-            "..", "../foo", "foo/..", "foo/../bar", "..\\foo", "foo\\..\\bar",
+            "..",
+            "../foo",
+            "foo/..",
+            "foo/../bar",
+            "..\\foo",
+            "foo\\..\\bar",
         ] {
             let err = validate_command_spec(&spec("cat", &[bad])).unwrap_err();
             assert!(
@@ -386,11 +414,10 @@ mod tests {
 
     #[test]
     fn rejects_flag_value_with_abs_path() {
-        let err = validate_command_spec(&spec("cargo", &["test", "--config=/etc/cargo"]))
-            .unwrap_err();
-        assert!(err.contains("absolute or home path value"));
         let err =
-            validate_command_spec(&spec("cargo", &["test", "--out=~/secrets"])).unwrap_err();
+            validate_command_spec(&spec("cargo", &["test", "--config=/etc/cargo"])).unwrap_err();
+        assert!(err.contains("absolute or home path value"));
+        let err = validate_command_spec(&spec("cargo", &["test", "--out=~/secrets"])).unwrap_err();
         assert!(err.contains("absolute or home path value"));
     }
 
@@ -403,11 +430,7 @@ mod tests {
     #[test]
     fn accepts_ordinary_commands() {
         validate_command_spec(&spec("cargo", &["test", "--release"])).unwrap();
-        validate_command_spec(&spec(
-            "git",
-            &["commit", "-m", "fix: bug", "src/main.rs"],
-        ))
-        .unwrap();
+        validate_command_spec(&spec("git", &["commit", "-m", "fix: bug", "src/main.rs"])).unwrap();
         validate_command_spec(&spec("rustc", &["src/main.rs", "-o", "target/out"])).unwrap();
         validate_command_spec(&spec("ls", &["-la", "tests"])).unwrap();
     }
